@@ -1,0 +1,106 @@
+services:
+  dispatcher:
+    build: ./dispatcher
+    container_name: dispatcher
+    ports:
+      - "8000:8000"
+    environment:
+      - DISPATCHER_DB_URI=mongodb://dispatcher_db:27017
+      - DISPATCHER_DB_NAME=dispatcher_db
+      - AUTH_SERVICE_URL=http://auth_service:8001
+      - PRODUCT_SERVICE_URL=http://product_service:8002
+      - REPORT_SERVICE_URL=http://report_service:8003
+      - JWT_SECRET=super-secret-key
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      - dispatcher_db
+      - auth_service
+      - product_service
+      - report_service
+    networks:
+      - internal_net
+
+  auth_service:
+    build: ./auth_service
+    container_name: auth_service
+    expose:
+      - "8001"
+    environment:
+      - DB_URI=mongodb://auth_db:27017
+      - DB_NAME=auth_db
+      - JWT_SECRET=super-secret-key
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      - auth_db
+    networks:
+      - internal_net
+
+  product_service:
+    build: ./product_service
+    container_name: product_service
+    expose:
+      - "8002"
+    environment:
+      - DB_URI=mongodb://product_db:27017
+      - DB_NAME=product_db
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      - product_db
+    networks:
+      - internal_net
+
+  report_service:
+    build: ./report_service
+    container_name: report_service
+    expose:
+      - "8003"
+    environment:
+      - DB_URI=mongodb://report_db:27017
+      - DB_NAME=report_db
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      - report_db
+    networks:
+      - internal_net
+
+  dispatcher_db:
+    image: mongo:7
+    container_name: dispatcher_db
+    volumes:
+      - dispatcher_data:/data/db
+    networks:
+      - internal_net
+
+  auth_db:
+    image: mongo:7
+    container_name: auth_db
+    volumes:
+      - auth_data:/data/db
+    networks:
+      - internal_net
+
+  product_db:
+    image: mongo:7
+    container_name: product_db
+    volumes:
+      - product_data:/data/db
+    networks:
+      - internal_net
+
+  report_db:
+    image: mongo:7
+    container_name: report_db
+    volumes:
+      - report_data:/data/db
+    networks:
+      - internal_net
+
+volumes:
+  dispatcher_data:
+  auth_data:
+  product_data:
+  report_data:
+
+networks:
+  internal_net:
+    driver: bridge
