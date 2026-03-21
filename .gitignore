@@ -7,3 +7,7 @@ venv/
 *.log
 .DS_Store
 Thumbs.db
+
+# k6 otomatik uretilen ozet dosyalari (tekrar calistirilabilir)
+load-tests/k6-summary.json
+load-tests/k6-summary-*.json

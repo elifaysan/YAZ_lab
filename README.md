@@ -75,3 +75,150 @@ Tum dis dunya istekleri yalnizca Dispatcher uzerinden yapilir.
 - `GET /reports`
   - Header: `Authorization: Bearer <token>`
   - Responses: `200`, `401`, `403`, `503`
+
+## k6 Yük Testi
+
+### Amac
+
+Dispatcher'in 50/100/200/500 eszamanli kullanici altinda:
+- yanit suresi,
+- hata orani,
+- yonlendirme basarisini olcmek.
+
+### Calistirma
+
+1. Sistem ayakta olsun:
+
+```bash
+docker compose up --build -d
+```
+
+2. k6 kuruluysa PowerShell'de:
+
+```powershell
+.\load-tests\run-k6.ps1
+```
+
+Alternatif tek komut:
+
+```powershell
+k6 run --env BASE_URL=http://localhost:8000 --env USERNAME=admin --env PASSWORD=admin123 --summary-export .\load-tests\k6-summary.json .\load-tests\k6-load.js
+```
+
+### Cikti
+
+- Konsolda:
+  - `http_req_duration` (ort, p95)
+  - `http_req_failed` (hata orani)
+  - `checks` (dogrulama basari orani)
+- Dosya:
+  - `load-tests/k6-summary.json`
+
+### Rapor icin onerilen tablo
+
+| Eszamanli Kullanici | Ortalama Sure (ms) | p95 (ms) | Hata Orani |
+|---|---:|---:|---:|
+| 50 | 908.21 | 3362.57 | 0.00% |
+| 100 | 2099.40 | 5500.51 | 0.00% |
+| 200 | 4092.59 | 10481.04 | 3.60% |
+| 500 | 6884.46 | 13192.78 | 41.33% |
+
+Not: Bu degerler yerel makinede yapilan testten alinmistir. Donanim ve ag kosullarina gore degisebilir.
+
+## Sistem Tasarimi ve Diyagramlar
+
+### Konteyner Mimarisi (Mermaid)
+
+```mermaid
+flowchart LR
+  U[Dis Kullanici] --> D[Dispatcher :8000]
+  D --> A[Auth Service :8001]
+  D --> P[Product Service :8002]
+  D --> R[Report Service :8003]
+
+  D --> DDB[(dispatcher_db)]
+  A --> ADB[(auth_db)]
+  P --> PDB[(product_db)]
+  R --> RDB[(report_db)]
+```
+
+### Login + Urun Olusturma Sequence
+
+```mermaid
+sequenceDiagram
+  actor C as Client
+  participant D as Dispatcher
+  participant A as Auth Service
+  participant P as Product Service
+
+  C->>D: POST /auth/login
+  D->>A: POST /internal/login
+  A-->>D: access_token
+  D-->>C: 200 + token
+
+  C->>D: POST /products (Bearer token)
+  D->>D: JWT decode + authorize
+  D->>P: POST /internal/products (X-Internal-Token)
+  P-->>D: created product
+  D-->>C: 200 + product json
+```
+
+### Dispatcher Akisi
+
+```mermaid
+flowchart TD
+  IN[Request] --> ROUTE{Path}
+  ROUTE -->|/auth/login| AUTH[Forward auth]
+  ROUTE -->|/products* veya /reports| TOKEN{Bearer var mi?}
+  TOKEN -->|Hayir| E401[401 Missing token]
+  TOKEN -->|Evet| DEC[Token decode]
+  DEC -->|Fail| E401B[401 Invalid token]
+  DEC -->|OK| PERM{Yetki var mi?}
+  PERM -->|Hayir| E403[403 Forbidden]
+  PERM -->|Evet| FORWARD[Forward target service]
+  FORWARD -->|Upstream down| E503[503 Service unavailable]
+  FORWARD --> OK[200/4xx/5xx upstream response]
+```
+
+## Test Senaryolari ve Sonuclar
+
+### Dispatcher TDD Kapsami
+
+- Token yok -> `401`
+- Gecersiz token -> `401`
+- Yetki yok -> `403`
+- Gecersiz JSON body -> `400`
+- Upstream erisilemez -> `503`
+- Gecerli token + uygun rota -> basarili yonlendirme
+
+Son durum: `dispatcher` testleri `10 passed`.
+
+### Yük Testi Degerlendirmesi
+
+- 50 ve 100 kullanicida hata orani `%0`.
+- 200 kullanicida hata orani `%3.60` seviyesine cikiyor.
+- 500 kullanicida gecikme ve hata orani belirgin artiyor (`%41.33`).
+- Bu sonuc, mevcut tek dispatcher + senkron cagri modelinin daha yuksek yukte optimizasyona ihtiyac duydugunu gosteriyor.
+
+## Sonuc ve Tartisma
+
+Bu proje, mikroservis + API Gateway yapisinin temel isterlerini saglayan bir cekirdek sunmaktadir:
+
+- Tum dis trafik tek noktadan (`dispatcher`) yonetilir.
+- Her servis kendi veritabanina baglidir (veri izolasyonu).
+- Yetkilendirme dispatcher merkezlidir; mikroservisler ic token olmadan erisimi reddeder.
+- Docker Compose ile tum sistem tek komutla ayaga kalkar.
+- Dispatcher TDD ile gelistirilmis ve kritik hata kodu davranislari testle guvenceye alinmistir.
+
+### Sinirliliklar
+
+- 500 VU seviyesinde gecikme ve hata orani yuksektir.
+- Merkezi loglar su an temel seviyededir (gorsel dashboard sinirli).
+- `on_event` kullanimindan dolayi FastAPI deprecation uyarisi alinmaktadir.
+
+### Gelecek Gelistirmeler
+
+- Async/non-blocking iyilestirmeler ve connection pool tuning
+- Prometheus + Grafana ile detayli metrik paneli
+- Rate limit ve circuit breaker mekanizmalari
+- Lifespan API'ye gecis ve test kapsaminin daha da genisletilmesi
