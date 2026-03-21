@@ -19,6 +19,12 @@ def _token(role: str) -> str:
     return jwt.encode({"sub": "u1", "role": role}, "super-secret-key", algorithm="HS256")
 
 
+def test_metrics_endpoint_returns_200():
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert b"dispatcher_http_requests_total" in response.content
+
+
 def test_products_requires_token():
     response = client.get("/products")
     assert response.status_code == 401

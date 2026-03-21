@@ -125,6 +125,26 @@ k6 run --env BASE_URL=http://localhost:8000 --env USERNAME=admin --env PASSWORD=
 
 Not: Bu degerler yerel makinede yapilan testten alinmistir. Donanim ve ag kosullarina gore degisebilir.
 
+## Grafana ve Trafik Gozlemi
+
+### Ne yapildi?
+
+1. **Dispatcher** `GET /metrics` uzerinden Prometheus formatinda metrikler uretir.
+2. **Prometheus** bu metrikleri periyodik olarak toplar (`http://prometheus:9090`).
+3. **Grafana** Prometheus'u veri kaynagi olarak kullanir; hazir panelde istek hizi ve p95 gecikme grafikleri gorunur.
+4. **Detayli log tablosu**: `GET /dispatcher/traffic-table` (Bearer `admin` token) ile son 200 istek HTML tablosu olarak acilir.
+
+### Adresler
+
+| Servis | URL | Not |
+|--------|-----|-----|
+| Grafana | http://localhost:3000 | Kullanici: `admin`, parola: `admin123` |
+| Prometheus | http://localhost:9090 | Sorgu ve hedef kontrolu |
+| Dispatcher metrikleri | http://localhost:8000/metrics | Prometheus scrape |
+| Trafik tablosu | http://localhost:8000/dispatcher/traffic-table | Header: `Authorization: Bearer <token>` (admin) |
+
+Grafana'da sol menuden **Dashboards** -> **Dispatcher Genel Bakis** panelini acin. Trafik urettikten sonra grafiklerin dolmasi bir kac dakika surebilir.
+
 ## Sistem Tasarimi ve Diyagramlar
 
 ### Konteyner Mimarisi (Mermaid)
@@ -140,6 +160,9 @@ flowchart LR
   A --> ADB[(auth_db)]
   P --> PDB[(product_db)]
   R --> RDB[(report_db)]
+
+  PR[Prometheus :9090] -->|scrape /metrics| D
+  G[Grafana :3000] -->|sorgu| PR
 ```
 
 ### Login + Urun Olusturma Sequence
@@ -191,7 +214,7 @@ flowchart TD
 - Upstream erisilemez -> `503`
 - Gecerli token + uygun rota -> basarili yonlendirme
 
-Son durum: `dispatcher` testleri `10 passed`.
+Son durum: `dispatcher` testleri `11 passed` (metrik endpointi dahil).
 
 ### Yük Testi Degerlendirmesi
 
@@ -213,12 +236,12 @@ Bu proje, mikroservis + API Gateway yapisinin temel isterlerini saglayan bir cek
 ### Sinirliliklar
 
 - 500 VU seviyesinde gecikme ve hata orani yuksektir.
-- Merkezi loglar su an temel seviyededir (gorsel dashboard sinirli).
+- Grafana panelleri temel metriklerle sinirlidir (ileri seviye alarm/alert yok).
 - `on_event` kullanimindan dolayi FastAPI deprecation uyarisi alinmaktadir.
 
 ### Gelecek Gelistirmeler
 
 - Async/non-blocking iyilestirmeler ve connection pool tuning
-- Prometheus + Grafana ile detayli metrik paneli
+- Grafana'da alarm kurallari ve daha fazla panel
 - Rate limit ve circuit breaker mekanizmalari
 - Lifespan API'ye gecis ve test kapsaminin daha da genisletilmesi
