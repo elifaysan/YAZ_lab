@@ -1,13 +1,16 @@
+import json
 import os
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
 from pymongo import MongoClient
 
 app = FastAPI(title="Dispatcher")
+bearer_scheme = HTTPBearer(auto_error=False)
 
 DB_URI = os.getenv("DISPATCHER_DB_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DISPATCHER_DB_NAME", "dispatcher_db")
@@ -75,12 +78,21 @@ async def forward_request(base_url: str, path: str, method: str, json_body: Opti
             )
         except httpx.RequestError:
             raise HTTPException(status_code=503, detail="Service unavailable")
-    return JSONResponse(status_code=resp.status_code, content=resp.json() if resp.content else {})
+    if not resp.content:
+        return JSONResponse(status_code=resp.status_code, content={})
+    try:
+        payload = resp.json()
+    except json.JSONDecodeError:
+        payload = {"message": resp.text}
+    return JSONResponse(status_code=resp.status_code, content=payload)
 
 
 @app.post("/auth/login")
 async def login(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     return await forward_request(AUTH_SERVICE_URL, "/internal/login", "POST", body, {"X-Internal-Token": INTERNAL_SERVICE_TOKEN})
 
 
@@ -89,13 +101,24 @@ async def products_proxy(
     full_path: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
 ):
-    if not authorization or not authorization.startswith("Bearer "):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+    elif credentials and credentials.scheme.lower() == "bearer":
+        token = credentials.credentials
+    if not token:
         raise HTTPException(status_code=401, detail="Missing token")
-    claims = decode_token(authorization.replace("Bearer ", ""))
+    claims = decode_token(token)
     if not authorize(claims.get("role", ""), "/products"):
         raise HTTPException(status_code=403, detail="Forbidden")
-    body = await request.json() if request.method in {"POST", "PUT"} else None
+    body = None
+    if request.method in {"POST", "PUT"}:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     return await forward_request(
         PRODUCT_SERVICE_URL,
         f"/internal/products{full_path}",
@@ -106,10 +129,18 @@ async def products_proxy(
 
 
 @app.get("/reports")
-async def reports_proxy(authorization: Optional[str] = Header(default=None)):
-    if not authorization or not authorization.startswith("Bearer "):
+async def reports_proxy(
+    authorization: Optional[str] = Header(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+    elif credentials and credentials.scheme.lower() == "bearer":
+        token = credentials.credentials
+    if not token:
         raise HTTPException(status_code=401, detail="Missing token")
-    claims = decode_token(authorization.replace("Bearer ", ""))
+    claims = decode_token(token)
     if not authorize(claims.get("role", ""), "/reports"):
         raise HTTPException(status_code=403, detail="Forbidden")
     return await forward_request(

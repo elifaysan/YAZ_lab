@@ -34,6 +34,15 @@ def list_products(x_internal_token: str = Header(default="")):
     return {"items": docs}
 
 
+@app.get("/internal/products/{product_id}")
+def get_product(product_id: str, x_internal_token: str = Header(default="")):
+    check_internal(x_internal_token)
+    item = products.find_one({"id": product_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found")
+    return item
+
+
 @app.post("/internal/products")
 def create_product(payload: ProductIn, x_internal_token: str = Header(default="")):
     check_internal(x_internal_token)
