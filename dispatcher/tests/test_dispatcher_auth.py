@@ -85,3 +85,13 @@ def test_delete_products_requires_token():
 def test_delete_products_rejects_invalid_token():
     response = client.delete("/products/p-1", headers={"Authorization": "Bearer invalid.token"})
     assert response.status_code == 401
+
+
+def test_traffic_table_requires_token():
+    response = client.get("/dispatcher/traffic-table")
+    assert response.status_code == 401
+
+
+def test_traffic_table_forbidden_for_non_admin():
+    response = client.get("/dispatcher/traffic-table", headers={"Authorization": f"Bearer {_token('user')}"})
+    assert response.status_code == 403
