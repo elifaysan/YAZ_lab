@@ -29,6 +29,20 @@ curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json
 
 Dispatcher testleri `dispatcher/tests/` altinda tutulur ve once test yazilip sonra kod gelistirilir.
 
+### TDD Zaman Damgasi Kaniti (Red -> Green)
+
+Asagidaki iki ardisk commit, testlerin fonksiyonel koddan once eklendigini gosteren ornek bir TDD dongusudur:
+
+- `88fb3cc`: once testler eklendi (traffic-table limit davranisi)
+- `0960e30`: sonra kod guncellenerek test beklentisi saglandi
+
+Dogrulama komutlari:
+
+```bash
+git show --name-only 88fb3cc
+git show --name-only 0960e30
+```
+
 ## API Contract (RMM Seviye 2)
 
 Tum dis dunya istekleri yalnizca Dispatcher uzerinden yapilir.
@@ -144,6 +158,19 @@ Not: Bu degerler yerel makinede yapilan testten alinmistir. Donanim ve ag kosull
 | Trafik tablosu | http://localhost:8000/dispatcher/traffic-table | Header: `Authorization: Bearer <token>` (admin) |
 
 Grafana'da sol menuden **Dashboards** -> **Dispatcher Genel Bakis** panelini acin. Trafik urettikten sonra grafiklerin dolmasi bir kac dakika surebilir.
+
+### Sorun Giderme
+
+- `docker compose up --build` sirasinda servisler acilmiyorsa:
+  - `docker compose ps` ile durumlari kontrol edin.
+  - `docker compose logs dispatcher` ile hata detayina bakin.
+- Grafana bos gorunuyorsa:
+  - once API trafigi uretin (`test-api.ps1`).
+  - Prometheus hedefinde `dispatcher:8000` durumu `UP` olmali.
+- `k6` komutu taninmiyorsa:
+  - yeni terminal acin veya `C:\\Program Files\\k6\\k6.exe` ile calistirin.
+- `Missing token` hatasi normaldir:
+  - korumali endpointler icin `Authorization: Bearer <token>` zorunludur.
 
 ## Sistem Tasarimi ve Diyagramlar
 
