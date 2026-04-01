@@ -145,6 +145,19 @@ Not: Bu degerler yerel makinede yapilan testten alinmistir. Donanim ve ag kosull
 
 Grafana'da sol menuden **Dashboards** -> **Dispatcher Genel Bakis** panelini acin. Trafik urettikten sonra grafiklerin dolmasi bir kac dakika surebilir.
 
+### Sorun Giderme
+
+- `docker compose up --build` sirasinda servisler acilmiyorsa:
+  - `docker compose ps` ile durumlari kontrol edin.
+  - `docker compose logs dispatcher` ile hata detayina bakin.
+- Grafana bos gorunuyorsa:
+  - once API trafigi uretin (`test-api.ps1`).
+  - Prometheus hedefinde `dispatcher:8000` durumu `UP` olmali.
+- `k6` komutu taninmiyorsa:
+  - yeni terminal acin veya `C:\\Program Files\\k6\\k6.exe` ile calistirin.
+- `Missing token` hatasi normaldir:
+  - korumali endpointler icin `Authorization: Bearer <token>` zorunludur.
+
 ## Sistem Tasarimi ve Diyagramlar
 
 ### Konteyner Mimarisi (Mermaid)
