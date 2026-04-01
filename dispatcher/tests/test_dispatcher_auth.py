@@ -95,3 +95,19 @@ def test_traffic_table_requires_token():
 def test_traffic_table_forbidden_for_non_admin():
     response = client.get("/dispatcher/traffic-table", headers={"Authorization": f"Bearer {_token('user')}"})
     assert response.status_code == 403
+
+
+def test_traffic_table_limit_query_works_for_admin():
+    response = client.get(
+        "/dispatcher/traffic-table?limit=10",
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert response.status_code == 200
+
+
+def test_traffic_table_limit_query_rejects_too_high():
+    response = client.get(
+        "/dispatcher/traffic-table?limit=9999",
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert response.status_code == 422
