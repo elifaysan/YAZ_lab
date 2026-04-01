@@ -4,7 +4,7 @@ import time
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request, Security
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import HTMLResponse, JSONResponse
 from jose import JWTError, jwt
@@ -144,6 +144,7 @@ def _resolve_bearer_token(
 async def traffic_log_table(
     authorization: Optional[str] = Header(default=None),
     credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+    limit: int = Query(default=200, ge=1, le=500),
 ):
     token = _resolve_bearer_token(authorization, credentials)
     if not token:
@@ -154,7 +155,7 @@ async def traffic_log_table(
     rows = list(
         traffic_logs.find({}, {"_id": 1, "path": 1, "method": 1, "status_code": 1, "duration_ms": 1})
         .sort("_id", -1)
-        .limit(200)
+        .limit(limit)
     )
     tr_html = ""
     for doc in rows:
