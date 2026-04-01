@@ -29,6 +29,20 @@ curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json
 
 Dispatcher testleri `dispatcher/tests/` altinda tutulur ve once test yazilip sonra kod gelistirilir.
 
+### TDD Zaman Damgasi Kaniti (Red -> Green)
+
+Asagidaki iki ardisk commit, testlerin fonksiyonel koddan once eklendigini gosteren ornek bir TDD dongusudur:
+
+- `88fb3cc`: once testler eklendi (traffic-table limit davranisi)
+- `0960e30`: sonra kod guncellenerek test beklentisi saglandi
+
+Dogrulama komutlari:
+
+```bash
+git show --name-only 88fb3cc
+git show --name-only 0960e30
+```
+
 ## API Contract (RMM Seviye 2)
 
 Tum dis dunya istekleri yalnizca Dispatcher uzerinden yapilir.
