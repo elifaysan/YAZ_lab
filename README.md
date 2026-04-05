@@ -1,11 +1,6 @@
 # YazLab II — Proje 1
 
-| Ders | Yazılım Geliştirme Lab. II (2025–2026 Bahar) |
-|------|-----------------------------------------------|
-| Grup | **47** |
-| Repo | [elifaysan/YAZ_lab](https://github.com/elifaysan/YAZ_lab) |
-
-**Ekip:** Elif Aysan (221307008), Sinem Gül (221307027)
+Bunu Kocaeli Üniversitesi Teknoloji Fakültesi, Bilişim Sistemleri Mühendisliği bölümünde aldığımız **Yazılım Geliştirme Laboratuvarı II** dersinin (2025–2026 Bahar) birinci proje ödevi için birlikte hazırladık. **47. grubuz**; ekibimiz **Elif Aysan (221307008)** ve **Sinem Gül (221307027)**. Kaynak kodu ve commit geçmişini [elifaysan/YAZ_lab](https://github.com/elifaysan/YAZ_lab) reposunda tutuyoruz — öğretim üyesinin istediği Markdown rapor özeti de burada, ayrıntılı raporu ise teslimde Word/Markdown olarak veriyoruz.
 
 ---
 
