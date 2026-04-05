@@ -1,14 +1,12 @@
 # YazLab II — Proje 1
 
-Bunu Kocaeli Üniversitesi Teknoloji Fakültesi, Bilişim Sistemleri Mühendisliği bölümünde aldığımız **Yazılım Geliştirme Laboratuvarı II** dersinin (2025–2026 Bahar) birinci proje ödevi için birlikte hazırladık. **47. grubuz**; ekibimiz **Elif Aysan (221307008)** ve **Sinem Gül (221307027)**. Kaynak kodu ve commit geçmişini [elifaysan/YAZ_lab](https://github.com/elifaysan/YAZ_lab) reposunda tutuyoruz — öğretim üyesinin istediği Markdown rapor özeti de burada, ayrıntılı raporu ise teslimde Word/Markdown olarak veriyoruz.
-
----
-
 ## Ne yaptık?
 
-Mikroservis + **Dispatcher (API Gateway)** ödevi: dış trafik tek kapıdan giriyor, JWT ve Mongo’daki kurallarla yetki burada; **auth**, **product**, **report** servisleri ayrı **MongoDB** ile çalışıyor. Hepsi **Docker Compose** ile kalkıyor; yanında **Prometheus / Grafana**, **k6** yük testi ve Dispatcher için **pytest + TDD** kullandık.
+**Dispatcher**’ı dış dünyanın tek gördüğü kapı yaptık: istekleri yola göre **auth**, **product** veya **report** servisine yönlendiriyoruz. Kimlik doğrulama ve yetkiyi burada topladık — JWT’yi çözüyoruz, kuralları **MongoDB**’deki `access_rules` koleksiyonundan okuyoruz; yetkisiz isteklerde **401/403**, bozuk gövdede **400**, servis cevap vermezse **503** dönüyoruz (her şeyi 200’de JSON hata ile saklamıyoruz). Gelen giden trafiği de Mongo’da **traffic_logs** ile tutuyoruz; admin için HTML **trafik tablosu** ucu var.
 
-Ayrıntılı mimari, literatür, API/RMM açıklaması, test ve yük sonuçları **yazılı raporumuzda** (Word/Markdown teslim); burada sadece repoyu özetliyoruz.
+**Auth** iç login ile token üretiyor; **product** ürün CRUD, **report** rapor listesi sunuyor. Üç servisin de kendi **Mongo** konteyneri var; veri birbirine karışmıyor. Mikroservisleri host’a port açmadan sadece Docker ağında bıraktık; dışarıdan yalnızca dispatcher (ve izleme için Grafana/Prometheus) erişilebilir — iç çağrılarda **X-Internal-Token** kullanıyoruz.
+
+API tarafında kaynakları URI ve **GET/POST/PUT/DELETE** ile konuşacak şekilde kurguladık (**RMM Seviye 2** çizgisinde). Altyapıyı **Docker Compose** ile tek komutta kaldırıyoruz; **Prometheus** dispatcher `/metrics` topluyor, **Grafana**’da panel var. Yükü **k6** ile denedik; Dispatcher tarafını **pytest** ile yazdık ve TDD için en az bir döngüde testleri koddan önce commit’ledik (`88fb3cc` → `0960e30`).
 
 ## Çalıştırma
 
@@ -18,13 +16,11 @@ Docker Desktop açık olsun, proje kökünde:
 docker compose up --build
 ```
 
-Windows’ta hazır script: `.\CALISTIR.ps1` (bekleyip hazır olunca bilgi veriyor).
+Windows: `.\CALISTIR.ps1` (hazır olana kadar bekler).
 
 - Bilgi sayfası: http://127.0.0.1:8000/
-- API dokümantasyonu: http://127.0.0.1:8000/docs
+- Swagger: http://127.0.0.1:8000/docs
 - Grafana: http://localhost:3000 (`admin` / `admin123`)
-
-Örnek login:
 
 ```bash
 curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"admin123\"}"
@@ -34,14 +30,14 @@ curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json
 
 | Klasör | Rol |
 |--------|-----|
-| `dispatcher/` | API Gateway, yetki, log, `/metrics` |
-| `auth_service/` | Giriş, JWT |
+| `dispatcher/` | Gateway, yetki, log, `/metrics` |
+| `auth_service/` | Login, JWT |
 | `product_service/`, `report_service/` | İş servisleri |
-| `load-tests/` | k6 betikleri |
-| `observability/` | Prometheus + Grafana ayarı |
-| `teslim/` | Rapor taslağı, teslim betikleri (yerelde) |
+| `load-tests/` | k6 |
+| `observability/` | Prometheus + Grafana |
+| `teslim/` | Rapor / teslim dosyaları (yerel) |
 
-## Mimari özeti (Mermaid)
+## Mimari (Mermaid)
 
 ```mermaid
 flowchart LR
@@ -57,8 +53,7 @@ flowchart LR
   G[Grafana] --> PR
 ```
 
-## Kısa notlar
+## Notlar
 
-- **TDD (Dispatcher):** Örnek red→green commit zinciri: `88fb3cc` → `0960e30` (`git show` ile bakılabilir).
-- **Yük testi:** `.\load-tests\run-k6.ps1` — ayrıntılı tablo ve yorum raporda.
-- **Testler:** `docker compose exec dispatcher pytest tests -v`
+- Yük testi: `.\load-tests\run-k6.ps1`
+- Testler: `docker compose exec dispatcher pytest tests -v`
