@@ -1,0 +1,3175 @@
+========================================
+YAZLAB II - PROJE 1 - KAYNAK KOD ARSIVI
+Grup No: 47
+Dosya adi formati: 47_yazlab2_kaynakkod.txt
+========================================
+
+---------- DOSYA BASLANGIC: CALISTIR.ps1 ----------
+# YazLab - Docker stack'i baslatir ve hazir olana kadar bekler.
+# Kullanim: proje kokunde sag tik -> PowerShell ile calistir VEYA:
+#   powershell -ExecutionPolicy Bypass -File .\CALISTIR.ps1
+
+$ErrorActionPreference = "Stop"
+$Root = $PSScriptRoot
+Set-Location $Root
+
+Write-Host "=== YazLab - Docker kontrol ===" -ForegroundColor Cyan
+
+docker info 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "HATA: Docker calismiyor." -ForegroundColor Red
+    Write-Host "1) Docker Desktop'i acin (Windows'ta sistem tepsisinde balina simgesi)."
+    Write-Host "2) 'Engine running' olana kadar bekleyin."
+    Write-Host "3) Bu scripti tekrar calistirin."
+    Write-Host ""
+    Write-Host "Not: localhost:8000 / :3000 adresleri ancak Docker ayakta iken acilir."
+    exit 1
+}
+
+
+Write-Host "Docker OK. Konteynerler baslatiliyor (ilk seferde 2-5 dk surebilir)..." -ForegroundColor Yellow
+docker compose up -d --build
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "docker compose basarisiz. Yukaridaki hatayi okuyun." -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+$base = "http://127.0.0.1:8000"
+Write-Host "Dispatcher bekleniyor: $base ..." -ForegroundColor Yellow
+$ok = $false
+for ($i = 0; $i -lt 60; $i++) {
+    try {
+        $r = Invoke-WebRequest -Uri "$base/metrics" -UseBasicParsing -TimeoutSec 5
+        if ($r.StatusCode -eq 200) { $ok = $true; break }
+    } catch {
+        Start-Sleep -Seconds 3
+    }
+}
+
+if (-not $ok) {
+    Write-Host ""
+    Write-Host "HATA: 3 dakika icinde dispatcher yanit vermedi." -ForegroundColor Red
+    Write-Host "Log icin: docker compose logs dispatcher --tail 80"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "TAMAM - sistem hazir." -ForegroundColor Green
+Write-Host "  Giriş sayfasi:  $base/"
+Write-Host "  Swagger:        $base/docs"
+Write-Host "  Grafana:        http://127.0.0.1:3000  (admin / admin123)"
+Write-Host "  Prometheus:     http://127.0.0.1:9090"
+Write-Host ""
+Write-Host "Trafik tablosu HTML:  powershell -ExecutionPolicy Bypass -File .\teslim\trafik_tablosu_ac.ps1"
+Write-Host "Pytest (konteyner):   docker compose exec dispatcher pytest tests -v"
+Write-Host ""
+
+$open = Read-Host "Tarayicida giris sayfasini acmak ister misiniz? (E/H)"
+if ($open -eq "E" -or $open -eq "e" -or $open -eq "Y" -or $open -eq "y") {
+    Start-Process "$base/"
+}
+
+---------- DOSYA BITIS: CALISTIR.ps1 ----------
+
+---------- DOSYA BASLANGIC: docker-compose.yml ----------
+services:
+  dispatcher:
+    build: ./dispatcher
+    container_name: dispatcher
+    ports:
+      - "8000:8000"
+    environment:
+      - DISPATCHER_DB_URI=mongodb://dispatcher_db:27017
+      - DISPATCHER_DB_NAME=dispatcher_db
+      - AUTH_SERVICE_URL=http://auth_service:8001
+      - PRODUCT_SERVICE_URL=http://product_service:8002
+      - REPORT_SERVICE_URL=http://report_service:8003
+      - JWT_SECRET=super-secret-key
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      dispatcher_db:
+        condition: service_healthy
+      auth_service:
+        condition: service_started
+      product_service:
+        condition: service_started
+      report_service:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/metrics', timeout=5)",
+        ]
+      interval: 10s
+      timeout: 8s
+      retries: 5
+      start_period: 40s
+    networks:
+      - internal_net
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    depends_on:
+      dispatcher:
+        condition: service_healthy
+    networks:
+      - internal_net
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_DEFAULT_THEME=dark
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - internal_net
+
+  auth_service:
+    build: ./auth_service
+    container_name: auth_service
+    expose:
+      - "8001"
+    environment:
+      - DB_URI=mongodb://auth_db:27017
+      - DB_NAME=auth_db
+      - JWT_SECRET=super-secret-key
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      auth_db:
+        condition: service_healthy
+    networks:
+      - internal_net
+
+  product_service:
+    build: ./product_service
+    container_name: product_service
+    expose:
+      - "8002"
+    environment:
+      - DB_URI=mongodb://product_db:27017
+      - DB_NAME=product_db
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      product_db:
+        condition: service_healthy
+    networks:
+      - internal_net
+
+  report_service:
+    build: ./report_service
+    container_name: report_service
+    expose:
+      - "8003"
+    environment:
+      - DB_URI=mongodb://report_db:27017
+      - DB_NAME=report_db
+      - INTERNAL_SERVICE_TOKEN=internal-only-token
+    depends_on:
+      report_db:
+        condition: service_healthy
+    networks:
+      - internal_net
+
+  dispatcher_db:
+    image: mongo:7
+    container_name: dispatcher_db
+    volumes:
+      - dispatcher_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - internal_net
+
+  auth_db:
+    image: mongo:7
+    container_name: auth_db
+    volumes:
+      - auth_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - internal_net
+
+  product_db:
+    image: mongo:7
+    container_name: product_db
+    volumes:
+      - product_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - internal_net
+
+  report_db:
+    image: mongo:7
+    container_name: report_db
+    volumes:
+      - report_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - internal_net
+
+volumes:
+  dispatcher_data:
+  auth_data:
+  product_data:
+  report_data:
+
+networks:
+  internal_net:
+    driver: bridge
+
+---------- DOSYA BITIS: docker-compose.yml ----------
+
+---------- DOSYA BASLANGIC: README.md ----------
+# YazLab II — Proje 1
+
+| | |
+|--|--|
+| **Ders** | Yazılım Geliştirme Laboratuvarı II (2025–2026 Bahar) |
+| **Grup** | **47** |
+| **GitHub** | [elifaysan/YAZ_lab](https://github.com/elifaysan/YAZ_lab) |
+
+**Öğrenciler**
+
+| Ad soyad | Öğrenci numarası |
+|----------|------------------|
+| Elif Aysan | 221307008 |
+| Sinem Gül | 221307027 |
+
+Tarayıcıda çalışan sisteme giriş bilgi sayfası: `http://localhost:8000/` (Docker ayağa kalktıktan sonra).
+
+---
+
+Bu depo, mikroservis mimarisi + Dispatcher (API Gateway) gereksinimleri için geliştirilmiş projedir.
+
+## Mimari
+
+- `dispatcher`: Tek giris noktasi, yonlendirme + yetkilendirme + merkezi loglama
+- `auth_service`: Oturum acma/JWT uretimi
+- `product_service`: Urun CRUD mikroservisi
+- `report_service`: Basit rapor mikroservisi
+- Her servis icin ayri MongoDB konteyneri (veri izolasyonu)
+
+## Hizli Baslangic
+
+**Windows:** Once **Docker Desktop** acik olmali (kapaliyken `localhost:8000` hic acilmaz). Proje kokunde:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\CALISTIR.ps1
+```
+
+Bu script Docker kontrolu yapar, `docker compose up -d --build` calistirir, dispatcher hazir olana kadar bekler.
+
+1. Docker Desktop kurulu ve acik olsun.
+2. Proje kokunde (alternatif):
+
+```bash
+docker compose up --build
+```
+
+3. Dispatcher uzerinden ornek istek:
+
+```bash
+curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"admin123\"}"
+```
+
+## Dispatcher TDD Notu
+
+Dispatcher testleri `dispatcher/tests/` altinda tutulur ve once test yazilip sonra kod gelistirilir.
+
+### TDD Zaman Damgasi Kaniti (Red -> Green)
+
+Asagidaki iki ardisk commit, testlerin fonksiyonel koddan once eklendigini gosteren ornek bir TDD dongusudur:
+
+- `88fb3cc`: once testler eklendi (traffic-table limit davranisi)
+- `0960e30`: sonra kod guncellenerek test beklentisi saglandi
+
+Dogrulama komutlari:
+
+```bash
+git show --name-only 88fb3cc
+git show --name-only 0960e30
+```
+
+## API Contract (RMM Seviye 2)
+
+Tum dis dunya istekleri yalnizca Dispatcher uzerinden yapilir.
+
+### Auth
+
+- `POST /auth/login`
+  - Request:
+    - `{"username":"admin","password":"admin123"}`
+  - Responses:
+    - `200`: `{"access_token":"...","token_type":"bearer"}`
+    - `401`: gecersiz kimlik bilgisi
+    - `400`: gecersiz JSON
+    - `503`: auth servisi ulasilamaz
+
+### Products
+
+- `GET /products`
+  - Header: `Authorization: Bearer <token>`
+  - Responses: `200`, `401`, `403`, `503`
+
+- `GET /products/{id}`
+  - Header: `Authorization: Bearer <token>`
+  - Responses: `200`, `401`, `403`, `404`, `503`
+
+- `POST /products`
+  - Header: `Authorization: Bearer <token>`
+  - Request:
+    - `{"name":"Kalem","price":10.5,"stock":100}`
+  - Responses: `200`, `400`, `401`, `403`, `503`
+
+- `PUT /products/{id}`
+  - Header: `Authorization: Bearer <token>`
+  - Request:
+    - `{"name":"Kalem","price":12.0,"stock":80}`
+  - Responses: `200`, `400`, `401`, `403`, `404`, `503`
+
+- `DELETE /products/{id}`
+  - Header: `Authorization: Bearer <token>`
+  - Responses: `200`, `401`, `403`, `404`, `503`
+
+### Reports
+
+- `GET /reports`
+  - Header: `Authorization: Bearer <token>`
+  - Responses: `200`, `401`, `403`, `503`
+
+## k6 Yük Testi
+
+### Amac
+
+Dispatcher'in 50/100/200/500 eszamanli kullanici altinda:
+- yanit suresi,
+- hata orani,
+- yonlendirme basarisini olcmek.
+
+### Calistirma
+
+1. Sistem ayakta olsun:
+
+```bash
+docker compose up --build -d
+```
+
+2. k6 kuruluysa PowerShell'de:
+
+```powershell
+.\load-tests\run-k6.ps1
+```
+
+Alternatif tek komut:
+
+```powershell
+k6 run --env BASE_URL=http://localhost:8000 --env USERNAME=admin --env PASSWORD=admin123 --summary-export .\load-tests\k6-summary.json .\load-tests\k6-load.js
+```
+
+### Cikti
+
+- Konsolda:
+  - `http_req_duration` (ort, p95)
+  - `http_req_failed` (hata orani)
+  - `checks` (dogrulama basari orani)
+- Dosya:
+  - `load-tests/k6-summary.json`
+
+### Rapor icin onerilen tablo
+
+| Eszamanli Kullanici | Ortalama Sure (ms) | p95 (ms) | Hata Orani |
+|---|---:|---:|---:|
+| 50 | 908.21 | 3362.57 | 0.00% |
+| 100 | 2099.40 | 5500.51 | 0.00% |
+| 200 | 4092.59 | 10481.04 | 3.60% |
+| 500 | 6884.46 | 13192.78 | 41.33% |
+
+Not: Bu degerler yerel makinede yapilan testten alinmistir. Donanim ve ag kosullarina gore degisebilir.
+
+## Grafana ve Trafik Gozlemi
+
+### Ne yapildi?
+
+1. **Dispatcher** `GET /metrics` uzerinden Prometheus formatinda metrikler uretir.
+2. **Prometheus** bu metrikleri periyodik olarak toplar (`http://prometheus:9090`).
+3. **Grafana** Prometheus'u veri kaynagi olarak kullanir; hazir panelde istek hizi ve p95 gecikme grafikleri gorunur.
+4. **Detayli log tablosu**: `GET /dispatcher/traffic-table` (Bearer `admin` token) ile son 200 istek HTML tablosu olarak acilir.
+
+### Adresler
+
+| Servis | URL | Not |
+|--------|-----|-----|
+| Grafana | http://localhost:3000 | Kullanici: `admin`, parola: `admin123` |
+| Prometheus | http://localhost:9090 | Sorgu ve hedef kontrolu |
+| Dispatcher metrikleri | http://localhost:8000/metrics | Prometheus scrape |
+| Trafik tablosu | http://localhost:8000/dispatcher/traffic-table | Header: `Authorization: Bearer <token>` (admin) |
+
+Grafana'da sol menuden **Dashboards** -> **Dispatcher Genel Bakis** panelini acin. Trafik urettikten sonra grafiklerin dolmasi bir kac dakika surebilir.
+
+### Sorun Giderme
+
+- `docker compose up --build` sirasinda servisler acilmiyorsa:
+  - `docker compose ps` ile durumlari kontrol edin.
+  - `docker compose logs dispatcher` ile hata detayina bakin.
+- Grafana bos gorunuyorsa:
+  - once API trafigi uretin (`test-api.ps1`).
+  - Prometheus hedefinde `dispatcher:8000` durumu `UP` olmali.
+- `k6` komutu taninmiyorsa:
+  - yeni terminal acin veya `C:\\Program Files\\k6\\k6.exe` ile calistirin.
+- `Missing token` hatasi normaldir:
+  - korumali endpointler icin `Authorization: Bearer <token>` zorunludur.
+
+## Sistem Tasarimi ve Diyagramlar
+
+### Konteyner Mimarisi (Mermaid)
+
+```mermaid
+flowchart LR
+  U[Dis Kullanici] --> D[Dispatcher :8000]
+  D --> A[Auth Service :8001]
+  D --> P[Product Service :8002]
+  D --> R[Report Service :8003]
+
+  D --> DDB[(dispatcher_db)]
+  A --> ADB[(auth_db)]
+  P --> PDB[(product_db)]
+  R --> RDB[(report_db)]
+
+  PR[Prometheus :9090] -->|scrape /metrics| D
+  G[Grafana :3000] -->|sorgu| PR
+```
+
+### Login + Urun Olusturma Sequence
+
+```mermaid
+sequenceDiagram
+  actor C as Client
+  participant D as Dispatcher
+  participant A as Auth Service
+  participant P as Product Service
+
+  C->>D: POST /auth/login
+  D->>A: POST /internal/login
+  A-->>D: access_token
+  D-->>C: 200 + token
+
+  C->>D: POST /products (Bearer token)
+  D->>D: JWT decode + authorize
+  D->>P: POST /internal/products (X-Internal-Token)
+  P-->>D: created product
+  D-->>C: 200 + product json
+```
+
+### Dispatcher Akisi
+
+```mermaid
+flowchart TD
+  IN[Request] --> ROUTE{Path}
+  ROUTE -->|/auth/login| AUTH[Forward auth]
+  ROUTE -->|/products* veya /reports| TOKEN{Bearer var mi?}
+  TOKEN -->|Hayir| E401[401 Missing token]
+  TOKEN -->|Evet| DEC[Token decode]
+  DEC -->|Fail| E401B[401 Invalid token]
+  DEC -->|OK| PERM{Yetki var mi?}
+  PERM -->|Hayir| E403[403 Forbidden]
+  PERM -->|Evet| FORWARD[Forward target service]
+  FORWARD -->|Upstream down| E503[503 Service unavailable]
+  FORWARD --> OK[200/4xx/5xx upstream response]
+```
+
+## Test Senaryolari ve Sonuclar
+
+### Dispatcher TDD Kapsami
+
+- Token yok -> `401`
+- Gecersiz token -> `401`
+- Yetki yok -> `403`
+- Gecersiz JSON body -> `400`
+- Upstream erisilemez -> `503`
+- Gecerli token + uygun rota -> basarili yonlendirme
+
+Son durum: `dispatcher` testleri `11 passed` (metrik endpointi dahil).
+
+### Yük Testi Degerlendirmesi
+
+- 50 ve 100 kullanicida hata orani `%0`.
+- 200 kullanicida hata orani `%3.60` seviyesine cikiyor.
+- 500 kullanicida gecikme ve hata orani belirgin artiyor (`%41.33`).
+- Bu sonuc, mevcut tek dispatcher + senkron cagri modelinin daha yuksek yukte optimizasyona ihtiyac duydugunu gosteriyor.
+
+## Sonuc ve Tartisma
+
+Bu proje, mikroservis + API Gateway yapisinin temel isterlerini saglayan bir cekirdek sunmaktadir:
+
+- Tum dis trafik tek noktadan (`dispatcher`) yonetilir.
+- Her servis kendi veritabanina baglidir (veri izolasyonu).
+- Yetkilendirme dispatcher merkezlidir; mikroservisler ic token olmadan erisimi reddeder.
+- Docker Compose ile tum sistem tek komutla ayaga kalkar.
+- Dispatcher TDD ile gelistirilmis ve kritik hata kodu davranislari testle guvenceye alinmistir.
+
+### Sinirliliklar
+
+- 500 VU seviyesinde gecikme ve hata orani yuksektir.
+- Grafana panelleri temel metriklerle sinirlidir (ileri seviye alarm/alert yok).
+- `on_event` kullanimindan dolayi FastAPI deprecation uyarisi alinmaktadir.
+
+### Gelecek Gelistirmeler
+
+- Async/non-blocking iyilestirmeler ve connection pool tuning
+- Grafana'da alarm kurallari ve daha fazla panel
+- Rate limit ve circuit breaker mekanizmalari
+- Lifespan API'ye gecis ve test kapsaminin daha da genisletilmesi
+
+---------- DOSYA BITIS: README.md ----------
+
+---------- DOSYA BASLANGIC: test-api.ps1 ----------
+$ErrorActionPreference = "Stop"
+
+$baseUrl = "http://localhost:8000"
+
+Write-Host "1) Login ve token alma..."
+$loginBody = @{
+  username = "admin"
+  password = "admin123"
+} | ConvertTo-Json
+
+$login = Invoke-RestMethod `
+  -Method Post `
+  -Uri "$baseUrl/auth/login" `
+  -ContentType "application/json" `
+  -Body $loginBody
+
+$token = $login.access_token
+if (-not $token) {
+  throw "Token alinamadi."
+}
+Write-Host "Token alindi."
+
+$headers = @{ Authorization = "Bearer $token" }
+
+Write-Host "2) Urun olusturma..."
+$productBody = @{
+  name = "Kalem"
+  price = 12.5
+  stock = 30
+} | ConvertTo-Json
+
+$created = Invoke-RestMethod `
+  -Method Post `
+  -Uri "$baseUrl/products" `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body $productBody
+
+Write-Host "Olusan urun id: $($created.id)"
+
+Write-Host "3) Urunleri listeleme..."
+$list = Invoke-RestMethod -Method Get -Uri "$baseUrl/products" -Headers $headers
+Write-Host "Toplam urun sayisi: $($list.items.Count)"
+
+Write-Host "4) Tek urun getirme..."
+$id = $created.id
+$single = Invoke-RestMethod -Method Get -Uri "$baseUrl/products/$id" -Headers $headers
+Write-Host "Tek urun: $($single.name) / $($single.price)"
+
+Write-Host "5) Raporlari cekme..."
+$reports = Invoke-RestMethod -Method Get -Uri "$baseUrl/reports" -Headers $headers
+Write-Host "Rapor kaydi sayisi: $($reports.reports.Count)"
+
+Write-Host "Tamamlandi."
+
+---------- DOSYA BITIS: test-api.ps1 ----------
+
+---------- DOSYA BASLANGIC: auth_service\Dockerfile ----------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+
+---------- DOSYA BITIS: auth_service\Dockerfile ----------
+
+---------- DOSYA BASLANGIC: auth_service\requirements.txt ----------
+fastapi==0.115.0
+uvicorn==0.30.6
+pymongo==4.8.0
+python-jose==3.3.0
+
+---------- DOSYA BITIS: auth_service\requirements.txt ----------
+
+---------- DOSYA BASLANGIC: auth_service\app\main.py ----------
+import os
+from datetime import datetime, timedelta
+
+from fastapi import FastAPI, Header, HTTPException
+from jose import jwt
+from pydantic import BaseModel
+from pymongo import MongoClient
+
+app = FastAPI(title="Auth Service")
+
+DB_URI = os.getenv("DB_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DB_NAME", "auth_db")
+JWT_SECRET = os.getenv("JWT_SECRET", "super-secret-key")
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "internal-only-token")
+
+mongo_client = MongoClient(DB_URI)
+db = mongo_client[DB_NAME]
+users = db["users"]
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.on_event("startup")
+def seed_users() -> None:
+    if users.count_documents({}) == 0:
+        users.insert_many(
+            [
+                {"username": "admin", "password": "admin123", "role": "admin"},
+                {"username": "user", "password": "user123", "role": "user"},
+            ]
+        )
+
+
+@app.post("/internal/login")
+def login(payload: LoginRequest, x_internal_token: str = Header(default="")):
+    if x_internal_token != INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    user = users.find_one({"username": payload.username, "password": payload.password})
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = jwt.encode(
+        {
+            "sub": payload.username,
+            "role": user["role"],
+            "exp": datetime.utcnow() + timedelta(hours=2),
+        },
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+    return {"access_token": token, "token_type": "bearer"}
+
+---------- DOSYA BITIS: auth_service\app\main.py ----------
+
+---------- DOSYA BASLANGIC: auth_service\app\__init__.py ----------
+
+
+---------- DOSYA BITIS: auth_service\app\__init__.py ----------
+
+---------- DOSYA BASLANGIC: dispatcher\Dockerfile ----------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+COPY tests ./tests
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+---------- DOSYA BITIS: dispatcher\Dockerfile ----------
+
+---------- DOSYA BASLANGIC: dispatcher\requirements.txt ----------
+fastapi==0.115.0
+uvicorn==0.30.6
+httpx==0.27.2
+pymongo==4.8.0
+python-jose==3.3.0
+pytest==8.3.3
+prometheus-client==0.21.0
+
+---------- DOSYA BITIS: dispatcher\requirements.txt ----------
+
+---------- DOSYA BASLANGIC: dispatcher\app\main.py ----------
+import json
+import os
+import time
+from typing import Optional
+
+import httpx
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.responses import HTMLResponse, JSONResponse
+from jose import JWTError, jwt
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from pymongo import MongoClient
+from starlette.responses import Response
+
+app = FastAPI(title="Dispatcher")
+bearer_scheme = HTTPBearer(auto_error=False)
+
+DB_URI = os.getenv("DISPATCHER_DB_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DISPATCHER_DB_NAME", "dispatcher_db")
+JWT_SECRET = os.getenv("JWT_SECRET", "super-secret-key")
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "internal-only-token")
+
+AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://localhost:8001")
+PRODUCT_SERVICE_URL = os.getenv("PRODUCT_SERVICE_URL", "http://localhost:8002")
+REPORT_SERVICE_URL = os.getenv("REPORT_SERVICE_URL", "http://localhost:8003")
+
+mongo_client = MongoClient(DB_URI)
+db = mongo_client[DB_NAME]
+traffic_logs = db["traffic_logs"]
+access_rules = db["access_rules"]
+
+HTTP_REQUESTS = Counter(
+    "dispatcher_http_requests_total",
+    "Dispatcher uzerinden gecen HTTP istek sayisi",
+    ["method", "path_group", "status"],
+)
+HTTP_DURATION = Histogram(
+    "dispatcher_http_request_duration_seconds",
+    "Dispatcher istek suresi (saniye)",
+    ["method", "path_group"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
+
+def path_group(path: str) -> str:
+    if path.startswith("/auth"):
+        return "auth"
+    if path.startswith("/products"):
+        return "products"
+    if path.startswith("/reports"):
+        return "reports"
+    if path.startswith("/dispatcher"):
+        return "dispatcher"
+    if path == "/metrics":
+        return "metrics"
+    return "other"
+
+
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+
+def authorize(role: str, path: str) -> bool:
+    rule = access_rules.find_one({"role": role, "path_prefix": {"$regex": f"^{path}"}})
+    if rule:
+        return True
+    # Baslangic icin admin tum endpointlere ulasabilir.
+    return role == "admin"
+
+
+@app.on_event("startup")
+def startup_seed() -> None:
+    if access_rules.count_documents({}) == 0:
+        access_rules.insert_many(
+            [
+                {"role": "admin", "path_prefix": "/products"},
+                {"role": "admin", "path_prefix": "/reports"},
+                {"role": "user", "path_prefix": "/products"},
+            ]
+        )
+
+
+@app.middleware("http")
+async def metrics_and_traffic_log(request: Request, call_next):
+    group = path_group(request.url.path)
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    status = str(response.status_code)
+    HTTP_DURATION.labels(method=request.method, path_group=group).observe(duration)
+    HTTP_REQUESTS.labels(method=request.method, path_group=group, status=status).inc()
+    if request.url.path != "/metrics":
+        traffic_logs.insert_one(
+            {
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": response.status_code,
+                "duration_ms": round(duration * 1000, 2),
+            }
+        )
+    return response
+
+
+async def forward_request(base_url: str, path: str, method: str, json_body: Optional[dict], headers: dict):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.request(
+                method=method,
+                url=f"{base_url}{path}",
+                json=json_body,
+                headers=headers,
+            )
+        except httpx.RequestError:
+            raise HTTPException(status_code=503, detail="Service unavailable")
+    if not resp.content:
+        return JSONResponse(status_code=resp.status_code, content={})
+    try:
+        payload = resp.json()
+    except json.JSONDecodeError:
+        payload = {"message": resp.text}
+    return JSONResponse(status_code=resp.status_code, content=payload)
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/", response_class=HTMLResponse)
+def project_home():
+    return HTMLResponse(
+        content="""<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>YazLab II — Proje 1 · Grup 47</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: "Segoe UI", system-ui, sans-serif; margin: 0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(160deg, #0f172a 0%, #1e293b 45%, #334155 100%); color: #f1f5f9; }
+    .card { background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 16px; padding: 2rem 2.5rem; max-width: 32rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.45); }
+    h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+    .sub { color: #94a3b8; font-size: 0.95rem; margin-bottom: 1.75rem; }
+    dl { margin: 0; }
+    dt { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin-top: 1.1rem; }
+    dt:first-of-type { margin-top: 0; }
+    dd { margin: 0.35rem 0 0; font-size: 1.05rem; font-weight: 500; }
+    .row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.65rem 0;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.15); }
+    .row:last-child { border-bottom: none; }
+    .num { font-variant-numeric: tabular-nums; color: #38bdf8; }
+    footer { margin-top: 1.75rem; padding-top: 1.25rem; border-top: 1px solid rgba(148, 163, 184, 0.2);
+      font-size: 0.85rem; color: #94a3b8; }
+    a { color: #7dd3fc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Yazılım Geliştirme Laboratuvarı II</h1>
+    <p class="sub">Proje 1 · Mikroservis + Dispatcher (API Gateway)</p>
+    <dl>
+      <dt>Grup</dt>
+      <dd><span class="num">47</span></dd>
+      <dt>Öğrenciler</dt>
+      <dd>
+        <div class="row"><span>Elif Aysan</span><span class="num">221307008</span></div>
+        <div class="row"><span>Sinem Gül</span><span class="num">221307027</span></div>
+      </dd>
+      <dt>API giriş noktası</dt>
+      <dd><a href="/docs">Swagger UI (/docs)</a></dd>
+    </dl>
+    <footer>
+      Kaynak kod: <a href="https://github.com/elifaysan/YAZ_lab" rel="noopener">github.com/elifaysan/YAZ_lab</a>
+    </footer>
+  </div>
+</body>
+</html>"""
+    )
+
+
+def _resolve_bearer_token(
+    authorization: Optional[str],
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> Optional[str]:
+    if authorization and authorization.startswith("Bearer "):
+        return authorization.replace("Bearer ", "")
+    if credentials and credentials.scheme.lower() == "bearer":
+        return credentials.credentials
+    return None
+
+
+@app.get("/dispatcher/traffic-table", response_class=HTMLResponse)
+async def traffic_log_table(
+    authorization: Optional[str] = Header(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+    limit: int = Query(default=200, ge=1, le=500),
+):
+    token = _resolve_bearer_token(authorization, credentials)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    claims = decode_token(token)
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    rows = list(
+        traffic_logs.find({}, {"_id": 1, "path": 1, "method": 1, "status_code": 1, "duration_ms": 1})
+        .sort("_id", -1)
+        .limit(limit)
+    )
+    tr_html = ""
+    for doc in rows:
+        rid = str(doc.get("_id", ""))
+        p = doc.get("path", "")
+        m = doc.get("method", "")
+        sc = doc.get("status_code", "")
+        dm = doc.get("duration_ms", "")
+        tr_html += f"<tr><td>{rid}</td><td>{m}</td><td>{p}</td><td>{sc}</td><td>{dm}</td></tr>"
+    html = f"""<!DOCTYPE html>
+<html lang="tr"><head><meta charset="utf-8"/><title>Dispatcher Trafik Loglari</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 16px; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
+th {{ background: #f0f0f0; }}
+</style></head><body>
+<h1>Dispatcher — son {limit} istek</h1>
+<table><thead><tr><th>Id</th><th>Method</th><th>Path</th><th>Status</th><th>Sure (ms)</th></tr></thead>
+<tbody>{tr_html}</tbody></table>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.post("/auth/login")
+async def login(request: Request):
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    return await forward_request(AUTH_SERVICE_URL, "/internal/login", "POST", body, {"X-Internal-Token": INTERNAL_SERVICE_TOKEN})
+
+
+@app.api_route("/products{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def products_proxy(
+    full_path: str,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+    elif credentials and credentials.scheme.lower() == "bearer":
+        token = credentials.credentials
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    claims = decode_token(token)
+    if not authorize(claims.get("role", ""), "/products"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    body = None
+    if request.method in {"POST", "PUT"}:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    return await forward_request(
+        PRODUCT_SERVICE_URL,
+        f"/internal/products{full_path}",
+        request.method,
+        body,
+        {"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
+
+
+@app.get("/reports")
+async def reports_proxy(
+    authorization: Optional[str] = Header(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+    elif credentials and credentials.scheme.lower() == "bearer":
+        token = credentials.credentials
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    claims = decode_token(token)
+    if not authorize(claims.get("role", ""), "/reports"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return await forward_request(
+        REPORT_SERVICE_URL,
+        "/internal/reports",
+        "GET",
+        None,
+        {"X-Internal-Token": INTERNAL_SERVICE_TOKEN},
+    )
+
+---------- DOSYA BITIS: dispatcher\app\main.py ----------
+
+---------- DOSYA BASLANGIC: dispatcher\app\__init__.py ----------
+
+
+---------- DOSYA BITIS: dispatcher\app\__init__.py ----------
+
+---------- DOSYA BASLANGIC: dispatcher\tests\test_dispatcher_auth.py ----------
+import os
+import sys
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+from jose import jwt
+
+# Yerel pytest: main.py varsayilan mongodb://localhost:27017 kullanir.
+# Docker icinde: compose ortaminda DISPATCHER_DB_URI=mongodb://dispatcher_db:27017 zaten tanimlidir.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app import main  # noqa: E402
+from app.main import app  # noqa: E402
+
+
+client = TestClient(app)
+
+
+def _token(role: str) -> str:
+    return jwt.encode({"sub": "u1", "role": role}, "super-secret-key", algorithm="HS256")
+
+
+def test_metrics_endpoint_returns_200():
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert b"dispatcher_http_requests_total" in response.content
+
+
+def test_products_requires_token():
+    response = client.get("/products")
+    assert response.status_code == 401
+
+
+def test_reports_requires_token():
+    response = client.get("/reports")
+    assert response.status_code == 401
+
+
+def test_products_accepts_valid_token():
+    response = client.get("/products", headers={"Authorization": f"Bearer {_token('admin')}"})
+    assert response.status_code in [200, 503]
+
+
+def test_products_rejects_invalid_token():
+    response = client.get("/products", headers={"Authorization": "Bearer invalid.token.value"})
+    assert response.status_code == 401
+
+
+def test_reports_forbidden_for_user(monkeypatch):
+    monkeypatch.setattr(main, "authorize", lambda role, path: False)
+    response = client.get("/reports", headers={"Authorization": f"Bearer {_token('user')}"})
+    assert response.status_code == 403
+
+
+def test_products_invalid_json_returns_400():
+    response = client.post(
+        "/products",
+        headers={"Authorization": f"Bearer {_token('admin')}", "Content-Type": "application/json"},
+        content="{invalid",
+    )
+    assert response.status_code == 400
+
+
+def test_products_returns_503_when_upstream_unreachable(monkeypatch):
+    original_url = main.PRODUCT_SERVICE_URL
+    monkeypatch.setattr(main, "PRODUCT_SERVICE_URL", "http://service-does-not-exist.invalid")
+    response = client.get("/products", headers={"Authorization": f"Bearer {_token('admin')}"})
+    assert response.status_code == 503
+    monkeypatch.setattr(main, "PRODUCT_SERVICE_URL", original_url)
+
+
+def test_put_products_invalid_json_returns_400():
+    response = client.put(
+        "/products/p-1",
+        headers={"Authorization": f"Bearer {_token('admin')}", "Content-Type": "application/json"},
+        content="{invalid",
+    )
+    assert response.status_code == 400
+
+
+def test_delete_products_requires_token():
+    response = client.delete("/products/p-1")
+    assert response.status_code == 401
+
+
+def test_delete_products_rejects_invalid_token():
+    response = client.delete("/products/p-1", headers={"Authorization": "Bearer invalid.token"})
+    assert response.status_code == 401
+
+
+def test_traffic_table_requires_token():
+    response = client.get("/dispatcher/traffic-table")
+    assert response.status_code == 401
+
+
+def test_traffic_table_forbidden_for_non_admin():
+    response = client.get("/dispatcher/traffic-table", headers={"Authorization": f"Bearer {_token('user')}"})
+    assert response.status_code == 403
+
+
+def test_traffic_table_limit_query_works_for_admin():
+    response = client.get(
+        "/dispatcher/traffic-table?limit=10",
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert response.status_code == 200
+
+
+def test_traffic_table_limit_query_rejects_too_high():
+    response = client.get(
+        "/dispatcher/traffic-table?limit=9999",
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert response.status_code == 422
+
+---------- DOSYA BITIS: dispatcher\tests\test_dispatcher_auth.py ----------
+
+---------- DOSYA BASLANGIC: load-tests\k6-fixed.js ----------
+import http from "k6/http";
+import { check, sleep } from "k6";
+
+const BASE_URL = __ENV.BASE_URL || "http://localhost:8000";
+const USERNAME = __ENV.USERNAME || "admin";
+const PASSWORD = __ENV.PASSWORD || "admin123";
+const TARGET_VUS = Number(__ENV.TARGET_VUS || 50);
+const STAGE_SECONDS = Number(__ENV.STAGE_SECONDS || 45);
+
+export const options = {
+  scenarios: {
+    fixed_ramp: {
+      executor: "ramping-vus",
+      startVUs: 0,
+      stages: [
+        { duration: "10s", target: TARGET_VUS },
+        { duration: `${STAGE_SECONDS}s`, target: TARGET_VUS },
+        { duration: "10s", target: 0 },
+      ],
+      gracefulRampDown: "5s",
+    },
+  },
+  thresholds: {
+    http_req_failed: ["rate<0.05"],
+    checks: ["rate>0.95"],
+  },
+};
+
+function loginAndGetToken() {
+  const payload = JSON.stringify({ username: USERNAME, password: PASSWORD });
+  const res = http.post(`${BASE_URL}/auth/login`, payload, {
+    headers: { "Content-Type": "application/json" },
+  });
+
+  const ok = check(res, {
+    "login status 200": (r) => r.status === 200,
+    "login token exists": (r) => {
+      try {
+        return !!r.json("access_token");
+      } catch (_) {
+        return false;
+      }
+    },
+  });
+  if (!ok) return null;
+  return res.json("access_token");
+}
+
+export default function () {
+  const token = loginAndGetToken();
+  if (!token) {
+    sleep(1);
+    return;
+  }
+
+  const authHeaders = {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  };
+
+  const listRes = http.get(`${BASE_URL}/products`, authHeaders);
+  check(listRes, { "products status 200": (r) => r.status === 200 });
+
+  const createPayload = JSON.stringify({
+    name: `k6-fixed-${TARGET_VUS}-${__VU}-${Date.now()}`,
+    price: 10.0,
+    stock: 5,
+  });
+  const createRes = http.post(`${BASE_URL}/products`, createPayload, authHeaders);
+  check(createRes, { "create status 200": (r) => r.status === 200 });
+
+  const reportRes = http.get(`${BASE_URL}/reports`, authHeaders);
+  check(reportRes, { "reports status 200": (r) => r.status === 200 });
+
+  sleep(1);
+}
+
+---------- DOSYA BITIS: load-tests\k6-fixed.js ----------
+
+---------- DOSYA BASLANGIC: load-tests\k6-load.js ----------
+import http from "k6/http";
+import { check, sleep } from "k6";
+
+const BASE_URL = __ENV.BASE_URL || "http://localhost:8000";
+const USERNAME = __ENV.USERNAME || "admin";
+const PASSWORD = __ENV.PASSWORD || "admin123";
+
+export const options = {
+  scenarios: {
+    ramp_load: {
+      executor: "ramping-vus",
+      startVUs: 0,
+      stages: [
+        { duration: "30s", target: 50 },
+        { duration: "30s", target: 100 },
+        { duration: "30s", target: 200 },
+        { duration: "30s", target: 500 },
+        { duration: "20s", target: 0 },
+      ],
+      gracefulRampDown: "10s",
+    },
+  },
+  thresholds: {
+    http_req_failed: ["rate<0.05"],
+    http_req_duration: ["p(95)<1500"],
+    checks: ["rate>0.95"],
+  },
+};
+
+function loginAndGetToken() {
+  const payload = JSON.stringify({
+    username: USERNAME,
+    password: PASSWORD,
+  });
+
+  const res = http.post(`${BASE_URL}/auth/login`, payload, {
+    headers: { "Content-Type": "application/json" },
+  });
+
+  const ok = check(res, {
+    "login status 200": (r) => r.status === 200,
+    "login token exists": (r) => {
+      try {
+        return !!r.json("access_token");
+      } catch (_) {
+        return false;
+      }
+    },
+  });
+
+  if (!ok) return null;
+  return res.json("access_token");
+}
+
+export default function () {
+  const token = loginAndGetToken();
+  if (!token) {
+    sleep(1);
+    return;
+  }
+
+  const authHeaders = {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  };
+
+  const listRes = http.get(`${BASE_URL}/products`, authHeaders);
+  check(listRes, { "products status 200": (r) => r.status === 200 });
+
+  const createPayload = JSON.stringify({
+    name: `k6-item-${__VU}-${Date.now()}`,
+    price: 10.0,
+    stock: 5,
+  });
+  const createRes = http.post(`${BASE_URL}/products`, createPayload, authHeaders);
+  check(createRes, { "create status 200": (r) => r.status === 200 });
+
+  let createdId = null;
+  try {
+    createdId = createRes.json("id");
+  } catch (_) {
+    createdId = null;
+  }
+
+  if (createdId) {
+    const getRes = http.get(`${BASE_URL}/products/${createdId}`, authHeaders);
+    check(getRes, { "get by id status 200": (r) => r.status === 200 });
+  }
+
+  const reportRes = http.get(`${BASE_URL}/reports`, authHeaders);
+  check(reportRes, { "reports status 200": (r) => r.status === 200 });
+
+  sleep(1);
+}
+
+---------- DOSYA BITIS: load-tests\k6-load.js ----------
+
+---------- DOSYA BASLANGIC: load-tests\k6-summary-100.json ----------
+{
+    "metrics": {
+        "data_sent": {
+            "count": 677335,
+            "rate": 10258.97005266033
+        },
+        "http_req_sending": {
+            "avg": 0.03780421393841166,
+            "min": 0,
+            "med": 0,
+            "max": 5.1082,
+            "p(90)": 0,
+            "p(95)": 0.438
+        },
+        "http_req_duration{expected_response:true}": {
+            "p(90)": 4866.74741,
+            "p(95)": 5500.513390000001,
+            "avg": 2099.402076782816,
+            "min": 14.674,
+            "med": 1534.15625,
+            "max": 8431.4162
+        },
+        "vus": {
+            "value": 6,
+            "min": 6,
+            "max": 100
+        },
+        "http_req_receiving": {
+            "p(90)": 126.97744,
+            "p(95)": 178.38234500000013,
+            "avg": 51.817577755267415,
+            "min": 0,
+            "med": 22.3134,
+            "max": 670.0545
+        },
+        "http_reqs": {
+            "count": 2468,
+            "rate": 37.380525279168644
+        },
+        "checks": {
+            "passes": 3091,
+            "fails": 0,
+            "thresholds": {
+                "rate>0.95": false
+            },
+            "value": 1
+        },
+        "http_req_duration": {
+            "avg": 2099.402076782816,
+            "min": 14.674,
+            "med": 1534.15625,
+            "max": 8431.4162,
+            "p(90)": 4866.74741,
+            "p(95)": 5500.513390000001
+        },
+        "http_req_connecting": {
+            "avg": 0.03683845218800648,
+            "min": 0,
+            "med": 0,
+            "max": 2.4913,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "iterations": {
+            "count": 596,
+            "rate": 9.027063641160662
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 2468,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "http_req_tls_handshaking": {
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_waiting": {
+            "avg": 2047.5466948136143,
+            "min": 14.1402,
+            "med": 1501.5309499999998,
+            "max": 8256.9009,
+            "p(90)": 4746.800710000001,
+            "p(95)": 5413.613335
+        },
+        "iteration_duration": {
+            "avg": 9244.001093791956,
+            "min": 1179.6646,
+            "med": 9866.3633,
+            "max": 13838.0963,
+            "p(90)": 12170.5857,
+            "p(95)": 13480.776625
+        },
+        "vus_max": {
+            "value": 100,
+            "min": 100,
+            "max": 100
+        },
+        "http_req_blocked": {
+            "med": 0,
+            "max": 3.5038,
+            "p(90)": 0,
+            "p(95)": 0.5079,
+            "avg": 0.047624108589951385,
+            "min": 0
+        },
+        "data_received": {
+            "count": 325840753,
+            "rate": 4935210.090964282
+        }
+    },
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "login status 200": {
+                    "passes": 623,
+                    "fails": 0,
+                    "name": "login status 200",
+                    "path": "::login status 200",
+                    "id": "a9f04e9f501317c68a9f824e04811bea"
+                },
+                "login token exists": {
+                    "id": "b072df1d3ac04c2150ffa1d315c98ef0",
+                    "passes": 623,
+                    "fails": 0,
+                    "name": "login token exists",
+                    "path": "::login token exists"
+                },
+                "products status 200": {
+                    "name": "products status 200",
+                    "path": "::products status 200",
+                    "id": "7a463d11f81f84d56ee861b8840edb44",
+                    "passes": 623,
+                    "fails": 0
+                },
+                "create status 200": {
+                    "name": "create status 200",
+                    "path": "::create status 200",
+                    "id": "c5098eee8ca4c8d6677c6a58d85f6c13",
+                    "passes": 617,
+                    "fails": 0
+                },
+                "reports status 200": {
+                    "name": "reports status 200",
+                    "path": "::reports status 200",
+                    "id": "3756813e80a673fdaa414fc0d8314628",
+                    "passes": 605,
+                    "fails": 0
+                }
+            }
+    }
+}
+---------- DOSYA BITIS: load-tests\k6-summary-100.json ----------
+
+---------- DOSYA BASLANGIC: load-tests\k6-summary-200.json ----------
+{
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "login status 200": {
+                    "name": "login status 200",
+                    "path": "::login status 200",
+                    "id": "a9f04e9f501317c68a9f824e04811bea",
+                    "passes": 712,
+                    "fails": 0
+                },
+                "login token exists": {
+                    "fails": 0,
+                    "name": "login token exists",
+                    "path": "::login token exists",
+                    "id": "b072df1d3ac04c2150ffa1d315c98ef0",
+                    "passes": 712
+                },
+                "products status 200": {
+                    "fails": 77,
+                    "name": "products status 200",
+                    "path": "::products status 200",
+                    "id": "7a463d11f81f84d56ee861b8840edb44",
+                    "passes": 615
+                },
+                "create status 200": {
+                    "name": "create status 200",
+                    "path": "::create status 200",
+                    "id": "c5098eee8ca4c8d6677c6a58d85f6c13",
+                    "passes": 594,
+                    "fails": 17
+                },
+                "reports status 200": {
+                    "name": "reports status 200",
+                    "path": "::reports status 200",
+                    "id": "3756813e80a673fdaa414fc0d8314628",
+                    "passes": 597,
+                    "fails": 0
+                }
+            }
+    },
+    "metrics": {
+        "http_req_receiving": {
+            "avg": 63.79905252679934,
+            "min": 0,
+            "med": 25.9364,
+            "max": 685.102,
+            "p(90)": 185.35039000000003,
+            "p(95)": 248.42580999999998
+        },
+        "http_req_duration": {
+            "avg": 4092.5876186447194,
+            "min": 13.458,
+            "med": 2801.89655,
+            "max": 13718.558,
+            "p(90)": 9911.535160000001,
+            "p(95)": 10481.037844999999
+        },
+        "data_sent": {
+            "count": 741146,
+            "rate": 10894.211303013883
+        },
+        "checks": {
+            "passes": 3230,
+            "fails": 94,
+            "thresholds": {
+                "rate>0.95": false
+            },
+            "value": 0.9717208182912154
+        },
+        "http_req_failed": {
+            "passes": 94,
+            "fails": 2518,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0.03598774885145482
+        },
+        "iterations": {
+            "count": 568,
+            "rate": 8.349113427195027
+        },
+        "http_req_duration{expected_response:true}": {
+            "avg": 3854.8488590548022,
+            "min": 13.458,
+            "med": 2687.6817,
+            "max": 13718.558,
+            "p(90)": 9344.7247,
+            "p(95)": 10294.54616
+        },
+        "http_req_tls_handshaking": {
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0
+        },
+        "vus_max": {
+            "min": 200,
+            "max": 200,
+            "value": 200
+        },
+        "http_reqs": {
+            "count": 2612,
+            "rate": 38.39416245041094
+        },
+        "iteration_duration": {
+            "avg": 16990.403061443652,
+            "min": 1264.577,
+            "med": 18343.397,
+            "max": 22902.7802,
+            "p(90)": 22163.21374,
+            "p(95)": 22308.4166
+        },
+        "http_req_blocked": {
+            "avg": 0.056811447166921894,
+            "min": 0,
+            "med": 0,
+            "max": 1.917,
+            "p(90)": 0,
+            "p(95)": 0.533045
+        },
+        "data_received": {
+            "count": 350276096,
+            "rate": 5148758.549892701
+        },
+        "http_req_connecting": {
+            "p(90)": 0,
+            "p(95)": 0.524045,
+            "avg": 0.0490438361408882,
+            "min": 0,
+            "med": 0,
+            "max": 1.917
+        },
+        "http_req_waiting": {
+            "max": 13660.3767,
+            "p(90)": 9719.87628,
+            "p(95)": 10437.604285,
+            "avg": 4028.759715888216,
+            "min": 13.2742,
+            "med": 2773.36435
+        },
+        "http_req_sending": {
+            "p(90)": 0,
+            "p(95)": 0.50378,
+            "avg": 0.02885022970903522,
+            "min": 0,
+            "med": 0,
+            "max": 1.168
+        },
+        "vus": {
+            "value": 4,
+            "min": 4,
+            "max": 200
+        }
+    }
+}
+---------- DOSYA BITIS: load-tests\k6-summary-200.json ----------
+
+---------- DOSYA BASLANGIC: load-tests\k6-summary-50.json ----------
+{
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "login status 200": {
+                    "path": "::login status 200",
+                    "id": "a9f04e9f501317c68a9f824e04811bea",
+                    "passes": 615,
+                    "fails": 0,
+                    "name": "login status 200"
+                },
+                "login token exists": {
+                    "name": "login token exists",
+                    "path": "::login token exists",
+                    "id": "b072df1d3ac04c2150ffa1d315c98ef0",
+                    "passes": 615,
+                    "fails": 0
+                },
+                "products status 200": {
+                    "name": "products status 200",
+                    "path": "::products status 200",
+                    "id": "7a463d11f81f84d56ee861b8840edb44",
+                    "passes": 615,
+                    "fails": 0
+                },
+                "create status 200": {
+                    "name": "create status 200",
+                    "path": "::create status 200",
+                    "id": "c5098eee8ca4c8d6677c6a58d85f6c13",
+                    "passes": 615,
+                    "fails": 0
+                },
+                "reports status 200": {
+                    "path": "::reports status 200",
+                    "id": "3756813e80a673fdaa414fc0d8314628",
+                    "passes": 615,
+                    "fails": 0,
+                    "name": "reports status 200"
+                }
+            }
+    },
+    "metrics": {
+        "http_req_duration{expected_response:true}": {
+            "p(90)": 2529.23238,
+            "p(95)": 3362.5743199999997,
+            "avg": 908.2126596747977,
+            "min": 13.5278,
+            "med": 487.03110000000004,
+            "max": 4049.0653
+        },
+        "vus": {
+            "max": 50,
+            "value": 5,
+            "min": 4
+        },
+        "http_reqs": {
+            "count": 2460,
+            "rate": 37.590019329108834
+        },
+        "iteration_duration": {
+            "p(95)": 6091.4595,
+            "avg": 4630.825759216969,
+            "min": 1165.5607,
+            "med": 5375.6719,
+            "max": 6167.6818,
+            "p(90)": 6020.0576
+        },
+        "http_req_blocked": {
+            "p(95)": 0,
+            "avg": 0.01844154471544715,
+            "min": 0,
+            "med": 0,
+            "max": 3.2441,
+            "p(90)": 0
+        },
+        "http_req_connecting": {
+            "p(95)": 0,
+            "avg": 0.014310650406504062,
+            "min": 0,
+            "med": 0,
+            "max": 2.3034,
+            "p(90)": 0
+        },
+        "http_req_waiting": {
+            "avg": 887.2421019918704,
+            "min": 13.5278,
+            "med": 476.20465,
+            "max": 3973.4142,
+            "p(90)": 2503.7567699999995,
+            "p(95)": 3277.2677
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 2460,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "http_req_tls_handshaking": {
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0
+        },
+        "http_req_sending": {
+            "p(95)": 0,
+            "avg": 0.020219308943089438,
+            "min": 0,
+            "med": 0,
+            "max": 2.0224,
+            "p(90)": 0
+        },
+        "http_req_duration": {
+            "avg": 908.2126596747977,
+            "min": 13.5278,
+            "med": 487.03110000000004,
+            "max": 4049.0653,
+            "p(90)": 2529.23238,
+            "p(95)": 3362.5743199999997
+        },
+        "data_received": {
+            "count": 293246872,
+            "rate": 4480957.555561261
+        },
+        "http_req_receiving": {
+            "max": 371.6142,
+            "p(90)": 60.22347,
+            "p(95)": 83.6632749999999,
+            "avg": 20.95033837398373,
+            "min": 0,
+            "med": 6.99005
+        },
+        "checks": {
+            "passes": 3075,
+            "fails": 0,
+            "thresholds": {
+                "rate>0.95": false
+            },
+            "value": 1
+        },
+        "vus_max": {
+            "max": 50,
+            "value": 50,
+            "min": 50
+        },
+        "iterations": {
+            "count": 613,
+            "rate": 9.366943840952729
+        },
+        "data_sent": {
+            "count": 669594,
+            "rate": 10231.728212461503
+        }
+    }
+}
+---------- DOSYA BITIS: load-tests\k6-summary-50.json ----------
+
+---------- DOSYA BASLANGIC: load-tests\k6-summary-500.json ----------
+{
+    "root_group": {
+        "groups": {},
+        "checks": {
+                "login status 200": {
+                    "name": "login status 200",
+                    "path": "::login status 200",
+                    "id": "a9f04e9f501317c68a9f824e04811bea",
+                    "passes": 1186,
+                    "fails": 0
+                },
+                "login token exists": {
+                    "path": "::login token exists",
+                    "id": "b072df1d3ac04c2150ffa1d315c98ef0",
+                    "passes": 1186,
+                    "fails": 0,
+                    "name": "login token exists"
+                },
+                "products status 200": {
+                    "path": "::products status 200",
+                    "id": "7a463d11f81f84d56ee861b8840edb44",
+                    "passes": 244,
+                    "fails": 858,
+                    "name": "products status 200"
+                },
+                "create status 200": {
+                    "passes": 58,
+                    "fails": 757,
+                    "name": "create status 200",
+                    "path": "::create status 200",
+                    "id": "c5098eee8ca4c8d6677c6a58d85f6c13"
+                },
+                "reports status 200": {
+                    "passes": 805,
+                    "fails": 0,
+                    "name": "reports status 200",
+                    "path": "::reports status 200",
+                    "id": "3756813e80a673fdaa414fc0d8314628"
+                }
+            },
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e"
+    },
+    "metrics": {
+        "iteration_duration": {
+            "med": 29224.549,
+            "max": 34763.998,
+            "p(90)": 34127.8601,
+            "p(95)": 34322.779425,
+            "avg": 28863.277757506337,
+            "min": 1869.2558
+        },
+        "http_req_connecting": {
+            "med": 0,
+            "max": 2.1074,
+            "p(90)": 0.51265,
+            "p(95)": 0.5680199999999997,
+            "avg": 0.07696645342886388,
+            "min": 0
+        },
+        "http_req_sending": {
+            "avg": 0.02329306550665301,
+            "min": 0,
+            "med": 0,
+            "max": 1.6381,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "data_sent": {
+            "count": 1160516,
+            "rate": 16578.394516153556
+        },
+        "checks": {
+            "passes": 3479,
+            "fails": 1615,
+            "thresholds": {
+                "rate>0.95": true
+            },
+            "value": 0.6829603455045151
+        },
+        "http_reqs": {
+            "count": 3908,
+            "rate": 55.82720597486643
+        },
+        "http_req_waiting": {
+            "avg": 6795.568113715466,
+            "min": 15.4506,
+            "med": 5553.0045,
+            "max": 16762.3944,
+            "p(90)": 12567.44749,
+            "p(95)": 13173.18562
+        },
+        "vus": {
+            "max": 500,
+            "value": 2,
+            "min": 2
+        },
+        "http_req_duration": {
+            "p(90)": 12664.37317,
+            "p(95)": 13192.779299999998,
+            "avg": 6884.4640224667455,
+            "min": 15.4506,
+            "med": 5814.920700000001,
+            "max": 16846.9824
+        },
+        "http_req_duration{expected_response:true}": {
+            "min": 15.4506,
+            "med": 2390.2329,
+            "max": 16846.9824,
+            "p(90)": 6441.104980000004,
+            "p(95)": 12412.243760000003,
+            "avg": 3359.0158233318766
+        },
+        "http_req_tls_handshaking": {
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0
+        },
+        "iterations": {
+            "count": 786,
+            "rate": 11.228296800472112
+        },
+        "http_req_blocked": {
+            "med": 0,
+            "max": 2.1074,
+            "p(90)": 0.5154,
+            "p(95)": 0.7243649999999948,
+            "avg": 0.08546340839303992,
+            "min": 0
+        },
+        "http_req_receiving": {
+            "min": 0,
+            "med": 34.5416,
+            "max": 1496.4597,
+            "p(90)": 225.34290000000007,
+            "p(95)": 291.68646999999964,
+            "avg": 88.87261568577266
+        },
+        "http_req_failed": {
+            "passes": 1615,
+            "fails": 2293,
+            "thresholds": {
+                "rate<0.05": true
+            },
+            "value": 0.4132548618219038
+        },
+        "vus_max": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "data_received": {
+            "count": 148656592,
+            "rate": 2123613.659443624
+        }
+    }
+}
+---------- DOSYA BITIS: load-tests\k6-summary-500.json ----------
+
+---------- DOSYA BASLANGIC: load-tests\k6-summary.json ----------
+{
+    "root_group": {
+        "checks": {
+            "login status 200": {
+                "fails": 0,
+                "name": "login status 200",
+                "path": "::login status 200",
+                "id": "a9f04e9f501317c68a9f824e04811bea",
+                "passes": 2224
+            },
+            "login token exists": {
+                "name": "login token exists",
+                "path": "::login token exists",
+                "id": "b072df1d3ac04c2150ffa1d315c98ef0",
+                "passes": 2224,
+                "fails": 0
+            },
+            "products status 200": {
+                "name": "products status 200",
+                "path": "::products status 200",
+                "id": "7a463d11f81f84d56ee861b8840edb44",
+                "passes": 2183,
+                "fails": 0
+            },
+            "create status 200": {
+                "name": "create status 200",
+                "path": "::create status 200",
+                "id": "c5098eee8ca4c8d6677c6a58d85f6c13",
+                "passes": 2106,
+                "fails": 0
+            },
+            "get by id status 200": {
+                "name": "get by id status 200",
+                "path": "::get by id status 200",
+                "id": "c523c21b9b9d739244e595653d76020b",
+                "passes": 2044,
+                "fails": 0
+            },
+            "reports status 200": {
+                "id": "3756813e80a673fdaa414fc0d8314628",
+                "passes": 1993,
+                "fails": 0,
+                "name": "reports status 200",
+                "path": "::reports status 200"
+            }
+        },
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {}
+    },
+    "metrics": {
+        "http_req_receiving": {
+            "avg": 93.50511156398105,
+            "min": 0,
+            "med": 45.1733,
+            "max": 1375.3942,
+            "p(90)": 212.19818999999998,
+            "p(95)": 368.96678499999973
+        },
+        "vus_max": {
+            "min": 500,
+            "max": 500,
+            "value": 500
+        },
+        "http_req_connecting": {
+            "avg": 0.027864682464454987,
+            "min": 0,
+            "med": 0,
+            "max": 1.5593,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_sending": {
+            "avg": 0.02215924170616112,
+            "min": 0,
+            "med": 0,
+            "max": 2.0111,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_tls_handshaking": {
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0
+        },
+        "http_reqs": {
+            "count": 10550,
+            "rate": 72.59719436932802
+        },
+        "data_received": {
+            "count": 167866740,
+            "rate": 1155133.113926583
+        },
+        "iterations": {
+            "count": 1965,
+            "rate": 13.521657529453039
+        },
+        "data_sent": {
+            "count": 2948220,
+            "rate": 20287.440794648366
+        },
+        "http_req_failed": {
+            "fails": 10550,
+            "passes": 0,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "checks": {
+            "passes": 12774,
+            "fails": 0,
+            "thresholds": {
+                "rate>0.95": false
+            },
+            "value": 1
+        },
+        "http_req_duration": {
+            "p(90)": 5997.58035,
+            "p(95)": 6944.999604999998,
+            "avg": 2304.320960824652,
+            "min": 10.7369,
+            "med": 1475.6725000000001,
+            "max": 8453.4633,
+            "thresholds": {
+                "p(95)<1500": true
+            }
+        },
+        "http_req_waiting": {
+            "max": 8279.3595,
+            "p(90)": 5748.455550000001,
+            "p(95)": 6615.436479999999,
+            "avg": 2210.793690018958,
+            "min": 10.7369,
+            "med": 1423.1077500000001
+        },
+        "vus": {
+            "value": 32,
+            "min": 1,
+            "max": 500
+        },
+        "http_req_duration{expected_response:true}": {
+            "med": 1475.6725000000001,
+            "max": 8453.4633,
+            "p(90)": 5997.58035,
+            "p(95)": 6944.999604999998,
+            "avg": 2304.320960824652,
+            "min": 10.7369
+        },
+        "iteration_duration": {
+            "avg": 11076.889075928751,
+            "min": 1073.4545,
+            "med": 7786.0769,
+            "max": 31295.2166,
+            "p(90)": 27398.652140000006,
+            "p(95)": 29710.9755
+        },
+        "http_req_blocked": {
+            "min": 0,
+            "med": 0,
+            "max": 1.5593,
+            "p(90)": 0,
+            "p(95)": 0.34315999999999913,
+            "avg": 0.03366981990521329
+        }
+    }
+}
+---------- DOSYA BITIS: load-tests\k6-summary.json ----------
+
+---------- DOSYA BASLANGIC: load-tests\run-k6-matrix.ps1 ----------
+$ErrorActionPreference = "Stop"
+
+$baseUrl = $env:BASE_URL
+if (-not $baseUrl) { $baseUrl = "http://localhost:8000" }
+
+$k6Cmd = Get-Command k6 -ErrorAction SilentlyContinue
+if (-not $k6Cmd -and (Test-Path "C:\Program Files\k6\k6.exe")) {
+  $k6Cmd = "C:\Program Files\k6\k6.exe"
+}
+if (-not $k6Cmd) {
+  throw "k6 bulunamadi. Yeni terminal acip tekrar deneyin."
+}
+
+$targets = @(50, 100, 200, 500)
+$stageSeconds = 45
+$resultPath = ".\load-tests\k6-matrix-results.csv"
+$rows = @()
+
+foreach ($vus in $targets) {
+  $summaryPath = ".\load-tests\k6-summary-$vus.json"
+  Write-Host "Calisiyor: VUS=$vus"
+
+  & $k6Cmd run `
+    --env BASE_URL=$baseUrl `
+    --env USERNAME=admin `
+    --env PASSWORD=admin123 `
+    --env TARGET_VUS=$vus `
+    --env STAGE_SECONDS=$stageSeconds `
+    --summary-export $summaryPath `
+    ".\load-tests\k6-fixed.js" | Out-Null
+
+  $summary = Get-Content $summaryPath | ConvertFrom-Json
+  $avg = [math]::Round($summary.metrics.http_req_duration.avg, 2)
+  $p95 = [math]::Round($summary.metrics.http_req_duration."p(95)", 2)
+  $failedRate = [math]::Round(($summary.metrics.http_req_failed.value * 100), 2)
+
+  $rows += [pscustomobject]@{
+    vus = $vus
+    avg_ms = $avg
+    p95_ms = $p95
+    error_rate_percent = $failedRate
+  }
+}
+
+$rows | Export-Csv -NoTypeInformation -Encoding UTF8 $resultPath
+Write-Host "Tamamlandi: $resultPath"
+Write-Host "Sonuclar:"
+$rows | Format-Table -AutoSize
+
+---------- DOSYA BITIS: load-tests\run-k6-matrix.ps1 ----------
+
+---------- DOSYA BASLANGIC: load-tests\run-k6.ps1 ----------
+$ErrorActionPreference = "Stop"
+
+$baseUrl = $env:BASE_URL
+if (-not $baseUrl) { $baseUrl = "http://localhost:8000" }
+
+Write-Host "k6 load test baslatiliyor..."
+Write-Host "BASE_URL=$baseUrl"
+
+$k6Cmd = Get-Command k6 -ErrorAction SilentlyContinue
+if (-not $k6Cmd) {
+  if (Test-Path "C:\Program Files\k6\k6.exe") {
+    $k6Cmd = "C:\Program Files\k6\k6.exe"
+  }
+}
+if (-not $k6Cmd) {
+  throw "k6 bulunamadi. Yeni terminal acip tekrar deneyin."
+}
+
+& $k6Cmd run `
+  --env BASE_URL=$baseUrl `
+  --env USERNAME=admin `
+  --env PASSWORD=admin123 `
+  --summary-export ".\load-tests\k6-summary.json" `
+  ".\load-tests\k6-load.js"
+
+Write-Host ""
+Write-Host "Test tamamlandi."
+Write-Host "Ozet JSON: .\load-tests\k6-summary.json"
+
+---------- DOSYA BITIS: load-tests\run-k6.ps1 ----------
+
+---------- DOSYA BASLANGIC: observability\grafana\dashboards\dispatcher-overview.json ----------
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (path_group) (rate(dispatcher_http_requests_total[1m]))",
+          "legendFormat": "{{path_group}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Istek hizi (path_group)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, path_group) (rate(dispatcher_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{path_group}} p95",
+          "refId": "A"
+        }
+      ],
+      "title": "p95 yanit suresi (saniye)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["dispatcher"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Dispatcher Genel Bakis",
+  "uid": "dispatcher-overview",
+  "version": 1
+}
+
+---------- DOSYA BITIS: observability\grafana\dashboards\dispatcher-overview.json ----------
+
+---------- DOSYA BASLANGIC: observability\grafana\provisioning\dashboards\dashboard.yml ----------
+apiVersion: 1
+
+providers:
+  - name: Dispatcher
+    folder: ""
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
+
+---------- DOSYA BITIS: observability\grafana\provisioning\dashboards\dashboard.yml ----------
+
+---------- DOSYA BASLANGIC: observability\grafana\provisioning\datasources\datasource.yml ----------
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+---------- DOSYA BITIS: observability\grafana\provisioning\datasources\datasource.yml ----------
+
+---------- DOSYA BASLANGIC: observability\prometheus\prometheus.yml ----------
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: dispatcher
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - dispatcher:8000
+
+---------- DOSYA BITIS: observability\prometheus\prometheus.yml ----------
+
+---------- DOSYA BASLANGIC: product_service\Dockerfile ----------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+
+---------- DOSYA BITIS: product_service\Dockerfile ----------
+
+---------- DOSYA BASLANGIC: product_service\requirements.txt ----------
+fastapi==0.115.0
+uvicorn==0.30.6
+pymongo==4.8.0
+pydantic==2.9.2
+
+---------- DOSYA BITIS: product_service\requirements.txt ----------
+
+---------- DOSYA BASLANGIC: product_service\app\main.py ----------
+import os
+from typing import Optional
+
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
+from pymongo import MongoClient
+
+app = FastAPI(title="Product Service")
+
+DB_URI = os.getenv("DB_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DB_NAME", "product_db")
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "internal-only-token")
+
+mongo_client = MongoClient(DB_URI)
+db = mongo_client[DB_NAME]
+products = db["products"]
+
+
+class ProductIn(BaseModel):
+    name: str
+    price: float
+    stock: int
+
+
+def check_internal(x_internal_token: str) -> None:
+    if x_internal_token != INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@app.get("/internal/products")
+def list_products(x_internal_token: str = Header(default="")):
+    check_internal(x_internal_token)
+    docs = list(products.find({}, {"_id": 0}))
+    return {"items": docs}
+
+
+@app.get("/internal/products/{product_id}")
+def get_product(product_id: str, x_internal_token: str = Header(default="")):
+    check_internal(x_internal_token)
+    item = products.find_one({"id": product_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found")
+    return item
+
+
+@app.post("/internal/products")
+def create_product(payload: ProductIn, x_internal_token: str = Header(default="")):
+    check_internal(x_internal_token)
+    doc = payload.model_dump()
+    doc["id"] = f"p-{products.count_documents({}) + 1}"
+    products.insert_one(doc)
+    # insert_one, dict'e _id ekler; API'de Mongo tipini disari cikarmayiz.
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+
+@app.put("/internal/products/{product_id}")
+def update_product(product_id: str, payload: ProductIn, x_internal_token: str = Header(default="")):
+    check_internal(x_internal_token)
+    updated = products.update_one({"id": product_id}, {"$set": payload.model_dump()})
+    if updated.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    item: Optional[dict] = products.find_one({"id": product_id}, {"_id": 0})
+    return item
+
+
+@app.delete("/internal/products/{product_id}")
+def delete_product(product_id: str, x_internal_token: str = Header(default="")):
+    check_internal(x_internal_token)
+    deleted = products.delete_one({"id": product_id})
+    if deleted.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
+
+---------- DOSYA BITIS: product_service\app\main.py ----------
+
+---------- DOSYA BASLANGIC: product_service\app\__init__.py ----------
+
+
+---------- DOSYA BITIS: product_service\app\__init__.py ----------
+
+---------- DOSYA BASLANGIC: report_service\Dockerfile ----------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003"]
+
+---------- DOSYA BITIS: report_service\Dockerfile ----------
+
+---------- DOSYA BASLANGIC: report_service\requirements.txt ----------
+fastapi==0.115.0
+uvicorn==0.30.6
+pymongo==4.8.0
+
+---------- DOSYA BITIS: report_service\requirements.txt ----------
+
+---------- DOSYA BASLANGIC: report_service\app\main.py ----------
+import os
+
+from fastapi import FastAPI, Header, HTTPException
+from pymongo import MongoClient
+
+app = FastAPI(title="Report Service")
+
+DB_URI = os.getenv("DB_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DB_NAME", "report_db")
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "internal-only-token")
+
+mongo_client = MongoClient(DB_URI)
+db = mongo_client[DB_NAME]
+report_logs = db["report_logs"]
+
+
+@app.on_event("startup")
+def seed_report_data() -> None:
+    if report_logs.count_documents({}) == 0:
+        report_logs.insert_many(
+            [
+                {"event": "daily_sales", "value": 12},
+                {"event": "daily_users", "value": 53},
+            ]
+        )
+
+
+@app.get("/internal/reports")
+def get_reports(x_internal_token: str = Header(default="")):
+    if x_internal_token != INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return {"reports": list(report_logs.find({}, {"_id": 0}))}
+
+---------- DOSYA BITIS: report_service\app\main.py ----------
+
+---------- DOSYA BASLANGIC: report_service\app\__init__.py ----------
+
+
+---------- DOSYA BITIS: report_service\app\__init__.py ----------
+
+---------- DOSYA BASLANGIC: teslim\build_rapor_word.py ----------
+"""
+Markdown raporu Word (.docx) dosyasina donusturur.
+Kullanim (proje kokunden):
+  pip install -r teslim/requirements-docx.txt
+  python teslim/build_rapor_word.py
+Cikti: teslim/RAPOR_Grup47_YazLab2_Proje1.docx
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+try:
+    from docx import Document
+    from docx.shared import Pt
+except ImportError:
+    print("python-docx gerekli: pip install -r teslim/requirements-docx.txt", file=sys.stderr)
+    sys.exit(1)
+
+ROOT = Path(__file__).resolve().parent
+MD_PATH = ROOT / "RAPOR_YazLab2_Proje1.md"
+OUT_PATH = ROOT / "RAPOR_Grup47_YazLab2_Proje1.docx"
+
+
+def add_runs_with_bold(paragraph, text: str) -> None:
+    parts = re.split(r"(\*\*[^*]+\*\*|`[^`]+`)", text)
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**"):
+            r = paragraph.add_run(part[2:-2])
+            r.bold = True
+        elif part.startswith("`") and part.endswith("`"):
+            r = paragraph.add_run(part[1:-1])
+            r.font.name = "Consolas"
+            r.font.size = Pt(10)
+        else:
+            paragraph.add_run(part)
+
+
+def add_paragraph(doc, text: str, style: str | None = None) -> None:
+    text = text.strip()
+    if not text:
+        return
+    p = doc.add_paragraph(style=style)
+    add_runs_with_bold(p, text)
+
+
+def is_table_separator(line: str) -> bool:
+    s = line.strip()
+    if not s.startswith("|"):
+        return False
+    inner = s.strip("|").replace("|", "")
+    return bool(re.match(r"^[\s\-:|]+$", inner))
+
+
+def parse_table_row(line: str) -> list[str]:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return cells
+
+
+def flush_table(doc, rows: list[list[str]]) -> None:
+    if not rows:
+        return
+    cols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=cols)
+    table.style = "Table Grid"
+    for ri, row in enumerate(rows):
+        for ci in range(cols):
+            cell_text = row[ci] if ci < len(row) else ""
+            cell = table.rows[ri].cells[ci]
+            cell.text = ""
+            p = cell.paragraphs[0]
+            add_runs_with_bold(p, cell_text)
+    doc.add_paragraph()
+
+
+def convert_md_to_docx(md_text: str, out_path: Path) -> None:
+    doc = Document()
+    sect = doc.sections[0]
+    sect.left_margin = sect.right_margin = Pt(72)
+
+    lines = md_text.replace("\r\n", "\n").split("\n")
+    i = 0
+    in_fence = False
+    fence_lines: list[str] = []
+    fence_lang = ""
+    table_buf: list[list[str]] = []
+
+    while i < len(lines):
+        line = lines[i]
+
+        if in_fence:
+            if line.strip().startswith("```"):
+                in_fence = False
+                body = "\n".join(fence_lines)
+                if fence_lang.strip().lower() == "mermaid" or "flowchart" in body or "sequenceDiagram" in body:
+                    note = (
+                        "(Mermaid diyagram: Word'de cizilmez; "
+                        "`teslim/RAPOR_YazLab2_Proje1.md` veya GitHub onizlemesine bakin.)"
+                    )
+                    p = doc.add_paragraph()
+                    r = p.add_run(note)
+                    r.italic = True
+                else:
+                    p = doc.add_paragraph()
+                    r = p.add_run(body if body else "(bos)")
+                    r.font.name = "Consolas"
+                    r.font.size = Pt(9)
+                doc.add_paragraph()
+                fence_lines = []
+                fence_lang = ""
+            else:
+                fence_lines.append(line)
+            i += 1
+            continue
+
+        if line.strip().startswith("```"):
+            in_fence = True
+            fence_lang = line.strip().removeprefix("```").strip()
+            fence_lines = []
+            i += 1
+            continue
+
+        if line.strip().startswith("|"):
+            if is_table_separator(line):
+                i += 1
+                continue
+            table_buf.append(parse_table_row(line))
+            i += 1
+            continue
+        elif table_buf:
+            flush_table(doc, table_buf)
+            table_buf = []
+
+        if line.strip() == "---":
+            doc.add_paragraph("—" * 40)
+            i += 1
+            continue
+
+        if line.startswith("# "):
+            doc.add_heading(line[2:].strip(), level=0)
+            i += 1
+            continue
+        if line.startswith("## "):
+            doc.add_heading(line[3:].strip(), level=1)
+            i += 1
+            continue
+        if line.startswith("### "):
+            doc.add_heading(line[4:].strip(), level=2)
+            i += 1
+            continue
+
+        if line.strip().startswith("- "):
+            add_paragraph(doc, line.strip()[2:], style="List Bullet")
+            i += 1
+            continue
+
+        st = line.strip()
+        if (
+            len(st) >= 2
+            and st.startswith("*")
+            and st.endswith("*")
+            and not st.startswith("**")
+            and "**" not in st[1:-1]
+        ):
+            p = doc.add_paragraph()
+            r = p.add_run(st.strip("*").strip())
+            r.italic = True
+            i += 1
+            continue
+
+        if line.strip():
+            add_paragraph(doc, line)
+        i += 1
+
+    if table_buf:
+        flush_table(doc, table_buf)
+
+    doc.save(out_path)
+
+
+def main() -> None:
+    if not MD_PATH.is_file():
+        print(f"Bulunamadi: {MD_PATH}", file=sys.stderr)
+        sys.exit(1)
+    md = MD_PATH.read_text(encoding="utf-8")
+    convert_md_to_docx(md, OUT_PATH)
+    print(f"Olusturuldu: {OUT_PATH}")
+
+
+if __name__ == "__main__":
+    main()
+
+---------- DOSYA BITIS: teslim\build_rapor_word.py ----------
+
+---------- DOSYA BASLANGIC: teslim\github_adresi.txt ----------
+Yazılım Geliştirme Laboratuvarı-II — Proje 1
+Grup: 47
+
+GitHub deposu (kaynak kod + rapor):
+https://github.com/elifaysan/YAZ_lab
+
+---------- DOSYA BITIS: teslim\github_adresi.txt ----------
+
+---------- DOSYA BASLANGIC: teslim\olustur_kaynakkod.ps1 ----------
+# Kullanim: .\teslim\olustur_kaynakkod.ps1 -GrupNo 47
+# Cikti: teslim\47_yazlab2_kaynakkod.txt
+
+param(
+    [Parameter(Mandatory = $true)]
+    [string] $GrupNo
+)
+
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$outName = Join-Path (Join-Path $root "teslim") ("{0}_yazlab2_kaynakkod.txt" -f $GrupNo)
+
+$excludeDirs = @(".git", "__pycache__", ".pytest_cache", ".venv", "venv", "node_modules")
+$extensions = @(".py", ".yml", ".yaml", ".json", ".js", ".ps1", ".txt", ".md", "Dockerfile", ".gitignore")
+
+function ShouldIncludeFile {
+    param([string] $fullPath, [string] $rel)
+    foreach ($d in $excludeDirs) {
+        if ($rel -match [regex]::Escape($d)) { return $false }
+    }
+    $ext = [System.IO.Path]::GetExtension($fullPath)
+    $name = [System.IO.Path]::GetFileName($fullPath)
+    if ($extensions -contains $ext) { return $true }
+    if ($name -eq "Dockerfile" -or $name -eq ".gitignore") { return $true }
+    return $false
+}
+
+$sb = [System.Text.StringBuilder]::new()
+[void]$sb.AppendLine("========================================")
+[void]$sb.AppendLine("YAZLAB II - PROJE 1 - KAYNAK KOD ARSIVI")
+[void]$sb.AppendLine("Grup No: $GrupNo")
+[void]$sb.AppendLine("Dosya adi formati: ${GrupNo}_yazlab2_kaynakkod.txt")
+[void]$sb.AppendLine("========================================")
+[void]$sb.AppendLine("")
+
+Get-ChildItem -Path $root -Recurse -File | ForEach-Object {
+    $rel = $_.FullName.Substring($root.Length).TrimStart("\", "/")
+    if (-not (ShouldIncludeFile -fullPath $_.FullName -rel $rel)) { return }
+    [void]$sb.AppendLine("---------- DOSYA BASLANGIC: $rel ----------")
+    [void]$sb.AppendLine([System.IO.File]::ReadAllText($_.FullName, [System.Text.UTF8Encoding]::new($false)))
+    [void]$sb.AppendLine("---------- DOSYA BITIS: $rel ----------")
+    [void]$sb.AppendLine("")
+}
+
+[System.IO.File]::WriteAllText($outName, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+Write-Host "Olusturuldu: $outName"
+
+---------- DOSYA BITIS: teslim\olustur_kaynakkod.ps1 ----------
+
+---------- DOSYA BASLANGIC: teslim\RAPOR_YazLab2_Proje1.md ----------
+# Yazılım Geliştirme Laboratuvarı-II — Proje 1  
+## Mikroservis Mimarisi ve API Gateway (Dispatcher)
+
+| Alan | Değer |
+|------|--------|
+| **Ders** | YazLab II — 2025–2026 Bahar |
+| **Proje** | Proje I |
+| **Grup No** | **47** |
+| **Öğrenciler** | Elif Aysan — **221307008** · Sinem Gül — **221307027** |
+| **Tarih** | 5 Nisan 2026 |
+| **GitHub** | https://github.com/elifaysan/YAZ_lab |
+
+---
+
+## 1. Özet
+
+Bu projede, birden çok bağımsız mikroservisin tek bir giriş noktası üzerinden yönetildiği bir sistem geliştirilmiştir. **Dispatcher (API Gateway)** tüm dış istekleri karşılar; kimlik doğrulama ve yetkilendirme burada merkezi olarak yapılır. Ürün ve rapor işlevleri ayrı servislere bölünmüştür; her servis kendi **NoSQL** veritabanını kullanarak veri izolasyonu sağlanmıştır. Sistem **Docker Compose** ile ayağa kalkar; **Prometheus** ve **Grafana** ile gözlemlenebilirlik, **k6** ile yük testi ve **pytest** ile (özellikle dispatcher için) otomatik testler desteklenir.
+
+---
+
+## 2. Amaç ve Kapsam
+
+- REST tabanlı, kaynak odaklı API tasarımı (RMM Seviye 2’ye uyumlu kaynak ve HTTP yöntem kullanımı).
+- Mikroservisler arası gevşek bağlılık; servislerin bağımsız ölçeklenebilirliği ve dağıtımı.
+- Tek noktadan güvenlik: JWT doğrulama, rol tabanlı erişim kuralları, trafik loglama.
+- Her servis için ayrı NoSQL örneği (mantıksal/ fiziksel izolasyon).
+- Test edilebilir mimari: dispatcher için birim testleri; uçtan uca senaryolar için API ve yük testleri.
+
+---
+
+## 3. Literatür ve Kavramlar
+
+### 3.1 Richardson Maturity Model (RMM)
+
+REST API’lerin olgunluk seviyeleri genelde dört düzeyde özetlenir:
+
+| Seviye | Özellik |
+|--------|---------|
+| 0 | Tek uç nokta, tek HTTP yöntemi (çoğunlukla POST) |
+| 1 | Kaynaklara ayrı URI’ler |
+| 2 | HTTP yöntemlerinin anlamlı kullanımı (GET/POST/PUT/DELETE) ve uygun durum kodları |
+| 3 | HATEOAS (bağlantılarla keşfedilebilir API) |
+
+Bu projede API’ler **Seviye 2** hedefiyle tasarlanmıştır: kaynak URI’leri, doğru HTTP fiilleri ve anlamlı durum kodları (200, 201, 400, 401, 403, 404, 503 vb.) kullanılır.
+
+### 3.2 Mikroservis ve API Gateway
+
+Mikroservis mimarisinde her iş kapabilitesi ayrı deploy edilebilir bir servistir. **API Gateway (Dispatcher)**, istemcilerin tek adresle konuşmasını, güvenlik politikalarının tek yerde uygulanmasını ve yönlendirme (routing) ile basit orkestrasyonu sağlar.
+
+---
+
+## 4. Sistem Mimarisi
+
+### 4.1 Mantıksal mimari
+
+```mermaid
+flowchart LR
+  Client[İstemci]
+  GW[Dispatcher]
+  Auth[Auth Service]
+  Prod[Product Service]
+  Rep[Report Service]
+  M1[(Mongo Auth)]
+  M2[(Mongo Product)]
+  M3[(Mongo Report)]
+  Prom[Prometheus]
+  Graf[Grafana]
+
+  Client --> GW
+  GW --> Auth
+  GW --> Prod
+  GW --> Rep
+  Auth --> M1
+  Prod --> M2
+  Rep --> M3
+  GW --> Prom
+  Prom --> Graf
+```
+
+### 4.2 Docker Compose bileşenleri
+
+- **dispatcher**: FastAPI tabanlı ağ geçidi (port 8000).
+- **auth_service**, **product_service**, **report_service**: İş mikroservisleri.
+- **mongo_auth**, **mongo_product**, **mongo_report**: Servis başına ayrı MongoDB kapsayıcıları.
+- **prometheus**, **grafana**: Metrik toplama ve paneller.
+
+### 4.3 İstek akışı (özet)
+
+```mermaid
+sequenceDiagram
+  participant C as İstemci
+  participant D as Dispatcher
+  participant A as Auth Service
+  participant P as Product Service
+
+  C->>D: POST /auth/login (JSON)
+  D->>A: proxy
+  A-->>D: JWT
+  D-->>C: 200 + token
+
+  C->>D: GET /products (Authorization: Bearer)
+  D->>D: JWT doğrula + kural kontrolü
+  D->>P: proxy
+  P-->>D: JSON
+  D->>D: traffic_logs kaydı
+  D-->>C: 200
+```
+
+---
+
+## 5. Bileşenler ve Sorumluluklar
+
+| Bileşen | Sorumluluk |
+|---------|------------|
+| **Dispatcher** | Yönlendirme, JWT doğrulama, `access_rules` ile yetki, `traffic_logs` ile log, `/metrics`, admin uçları |
+| **Auth Service** | Kullanıcı doğrulama, token üretimi, kullanıcı/rol yönetimi ile ilgili uçlar |
+| **Product Service** | Ürün CRUD, ürün verisi için ayrı MongoDB |
+| **Report Service** | Raporlama verisi, ayrı MongoDB |
+
+---
+
+## 6. Veri ve Veritabanı Tasarımı
+
+Her servis kendi MongoDB örneğine bağlanır; şema esnek (doküman tabanlı) olsa da koleksiyonlar iş kurallarına göre ayrılır.
+
+**Dispatcher (mongo_auth ile paylaşılan veya ayrı yapılandırılabilir) örnek koleksiyonlar:**
+
+- `access_rules`: Yol ön eki, HTTP metodu, gerekli roller.
+- `traffic_logs`: Zaman damgası, kullanıcı, metot, yol, durum kodu, süre vb.
+
+**Product / Report servisleri:** kendi Mongo örneklerinde ürün ve rapor dokümanları.
+
+*Not: NoSQL için klasik ER diyagramı yerine yukarıdaki koleksiyon/kaynak ayrımı tercih edilmiştir.*
+
+---
+
+## 7. API Tasarımı (REST / RMM-2)
+
+Örnek kaynaklar (özet):
+
+| Kaynak / Önek | Metotlar | Açıklama |
+|---------------|----------|----------|
+| `/auth/login` | POST | Kimlik bilgisi ile token |
+| `/products` | GET, POST | Liste / oluşturma |
+| `/products/{id}` | GET, PUT, DELETE | Tekil ürün |
+| Rapor uçları | GET/POST (servis tanımına göre) | Rapor servisi |
+
+Dispatcher, dış dünyaya bu yolları proxy’ler; yetkisiz isteklerde **401/403**, hatalı gövdede **400**, aşağı akış kapalıysa **503** döndürülmesi hedeflenir.
+
+---
+
+## 8. Güvenlik ve İzolasyon
+
+- **Kimlik doğrulama:** JWT; dispatcher token’ı doğrular.
+- **Yetkilendirme:** MongoDB’deki kurallar ile yol + metot + rol eşlemesi.
+- **Veri izolasyonu:** Servis başına ayrı MongoDB konteyneri / bağlantı dizesi.
+- **Loglama:** İstek meta verileri `traffic_logs` içinde toplanır (uygun gizlilik ve kişisel veri politikası gözetilmelidir).
+
+---
+
+## 9. Test Stratejisi ve TDD
+
+### 9.1 Dispatcher için TDD özeti
+
+Önerilen kanıt zinciri (örnek commit sırası):
+
+1. **Kırmızı:** Önce test yazılır (ör. trafik tablosu `limit` parametresi, yetkisiz erişim).
+2. **Yeşil:** Dispatcher kodu testi geçecek şekilde güncellenir.
+3. **Refactor:** Gerekirse sadeleştirme.
+
+Projede ilgili testler `dispatcher/tests/` altında **pytest** ile çalıştırılır.
+
+### 9.2 Test senaryoları (örnek başlıklar)
+
+- Geçerli token ile izin verilen uçlara erişim.
+- Token yok / geçersiz → 401.
+- Rol yetersiz → 403.
+- Geçersiz JSON gövdesi → 400.
+- Üst servis yanıt vermez → 503.
+- `/metrics` Prometheus formatı.
+- Admin trafik tablosu: `limit` alt/üst sınırları.
+
+---
+
+## 10. Yük Testi (k6)
+
+README ve `load-tests/` altındaki betiklerle **50, 100, 200, 500** sanal kullanıcı senaryoları koşturulabilir. Metrikler: istek süresi, hata oranı, throughput. Özet sonuçlar rapor tablosuna işlenir; ham büyük JSON çıktıları genelde `.gitignore` ile repodan hariç tutulur.
+
+**Örnek sonuç tablosu (kendi koşumunuzla doldurun):**
+
+| VUs | Ort. süre (ms) | p95 (ms) | Hata % |
+|-----|----------------|----------|--------|
+| 50 | *…* | *…* | *…* |
+| 100 | *…* | *…* | *…* |
+| 200 | *…* | *…* | *…* |
+| 500 | *…* | *…* | *…* |
+
+---
+
+## 11. Gözlemlenebilirlik (Prometheus + Grafana)
+
+- Dispatcher **Prometheus** metrikleri üretir (`/metrics`).
+- **Grafana** ile paneller: istek hızı, gecikme, hata oranı (kurduğunuz dashboard’a göre).
+
+### 11.1 Ekran görüntüsü alınacak yerler (adım adım)
+
+**Ön koşul:** **Docker Desktop açık ve “Engine running”** olmalı. Kapalıysa tarayıcıda `localhost:8000`, Grafana veya pytest (konteyner) **çalışmaz**. Windows’ta proje kökünde `CALISTIR.ps1` çalıştırın: Docker’ı kontrol eder, stack’i kaldırır, dispatcher hazır olana kadar bekler.
+
+Ardından **30–60 saniye** daha bekleyin (Prometheus / Grafana). Port **8000 / 3000 / 9090** başka uygulama tarafından kullanılıyorsa adresleri değiştirmeniz gerekir.
+
+Aşağıdaki görselleri rapora **PNG veya JPG** olarak ekleyin.
+
+| # | Konu | Adım | Adres / komut |
+|---|------|------|----------------|
+| **A** | **Proje giriş sayfası** | Tarayıcıda açın; grup ve öğrenci kartı tam görünsün. Çalışmazsa `http://127.0.0.1:8000/` deneyin. | `http://localhost:8000/` |
+| **B** | **Grafana** | 1) `http://localhost:3000` → giriş: **admin** / **admin123**. 2) İlk açılışta şifre değiştirme ekranı çıkarsa yeni şifre verin veya atlayın (sürüme göre değişir). 3) Doğrudan hazır panele gidin (aşağıdaki link). 4) Grafikler boşsa tarayıcıda birkaç istek üretin: ana sayfa `http://localhost:8000/` veya Swagger `http://localhost:8000/docs` üzerinden `GET /products` (token ile); **15 dakika** zaman aralığı seçili olsun. | Panel: `http://localhost:3000/d/dispatcher-overview/dispatcher-genel-bakis` |
+| **C** | **Trafik tablosu** | **Önerilen (PowerShell):** Aşağıdaki komutlar token alır, HTML’yi diske yazar ve varsayılan tarayıcıda açar; tablonun ekran görüntüsünü alın. | Komutlar §11.2 |
+| **D** | **k6 özeti** | Bilgisayarda **k6 kurulu** olmalı (`k6 version`). Stack ayakta iken proje kökünde `.\load-tests\run-k6.ps1`. Özet terminalde; ayrıca `load-tests\k6-summary.json` oluşur. | `.\load-tests\run-k6.ps1` |
+| **E** | **pytest** | Dispatcher konteynerinde çalıştırın (aşağıdaki komut). `passed` sayısı görünsün. | `docker compose exec dispatcher pytest tests -v` |
+
+**Swagger ile trafik tablosu (alternatif):** `http://localhost:8000/docs` → **Authorize** → kutuya **yalnızca JWT’yi** yapıştırın (**`Bearer ` yazmayın**; arayüz kendisi ekler). `GET /dispatcher/traffic-table` → **Execute**. Yanıt `text/html` ise gövde önizlemesinden veya “Download” ile tam sayfa gibi ekran görüntüsü alın.
+
+**Rapora sıra:** A → B → C → D → E.
+
+### 11.2 Trafik tablosu — PowerShell (Windows)
+
+**En kolayı:** proje kökünde (stack ayakta iken):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\teslim\trafik_tablosu_ac.ps1
+```
+
+Aynı işi elle yapmak için (`127.0.0.1` genelde `localhost` sorunlarını azaltır):
+
+```powershell
+$body = '{"username":"admin","password":"admin123"}'
+$r = Invoke-RestMethod -Uri "http://127.0.0.1:8000/auth/login" -Method Post -ContentType "application/json; charset=utf-8" -Body $body
+$htmlPath = Join-Path $env:TEMP "dispatcher-traffic.html"
+Invoke-WebRequest -Uri "http://127.0.0.1:8000/dispatcher/traffic-table?limit=50" -Headers @{ Authorization = "Bearer $($r.access_token)" } -OutFile $htmlPath
+Start-Process $htmlPath
+```
+
+Açılan sayfada tabloyu yakalayın.
+
+### 11.3 Word raporu
+
+Proje kökünde: `powershell -ExecutionPolicy Bypass -File .\teslim\WORD_RAPOR_OLUSTUR.ps1` (Python kurulu olmalı). Çıktı: `teslim/RAPOR_Grup47_YazLab2_Proje1.docx`.
+
+**Yer tutucu satırlar (PDF’e görsel ekledikten sonra silebilirsiniz):**
+
+1. Proje giriş sayfası — `ss-01-localhost-8000.png`
+2. Grafana — `ss-02-grafana.png`
+3. Trafik tablosu — `ss-03-traffic-table.png`
+4. k6 özeti — `ss-04-k6.png`
+5. pytest — `ss-05-pytest.png`
+
+---
+
+## 12. Kurulum ve Çalıştırma (Özet)
+
+```bash
+docker compose up --build
+```
+
+- API Gateway: `http://localhost:8000` (README ile uyumlu olmalıdır).
+- Testler: `docker compose exec dispatcher pytest tests -v` (konteyner içi çalışma dizini `/app`; test klasörü `tests/`).
+
+---
+
+## 13. Sonuç ve Değerlendirme
+
+Bu çalışmada mikroservisler ayrıştırılmış, güvenlik ve loglama dispatcher’da merkezileştirilmiş ve servis başına veri izolasyonu sağlanmıştır. REST olgunluk düzeyi 2 hedefiyle uyumlu HTTP kullanımı, otomatik testler ve yük testleri ile sistem davranışı ölçülebilir hale getirilmiştir. Gelecekte HATEOAS (RMM-3), dağıtık izleme (trace ID) ve daha ayrıntılı SLO/alert kuralları eklenebilir.
+
+---
+
+## 14. Teslim Kontrol Listesi (Ödev Metnine Göre)
+
+| Gereksinim | Durum / Not |
+|------------|-------------|
+| Kaynak kodların tek `.txt` dosyasında alt alta birleştirilmesi | `teslim/olustur_kaynakkod.ps1 -GrupNo 47` → `teslim/47_yazlab2_kaynakkod.txt` |
+| GitHub adresinin yazılı olduğu metin dosyası | `teslim/github_adresi.txt` |
+| Kod ve raporun teslim öncesi GitHub’da olması | Depo: https://github.com/elifaysan/YAZ_lab |
+| Bu rapor | Markdown: `teslim/RAPOR_YazLab2_Proje1.md` · Word: `teslim/WORD_RAPOR_OLUSTUR.ps1` veya `python teslim/build_rapor_word.py` |
+
+**Kapak:** Grup **47** — Elif Aysan **221307008**, Sinem Gül **221307027**. Word dosyası ürettikten sonra Word’de ekran görüntülerini ilgili bölümlere yapıştırabilirsiniz.
+
+---
+
+## Kaynakça (Örnek)
+
+- Fielding, R. T. — Architectural Styles and the Design of Network-based Software Architectures (REST doktora tezi, 2000).
+- Richardson, L. — Richardson Maturity Model (REST API olgunluk modeli).
+- Newman, S. — *Building Microservices* (O’Reilly).
+- FastAPI, MongoDB, Prometheus, Grafana, k6 resmi dokümantasyonları.
+
+---
+
+*Bu belge proje deposunun `teslim/` klasöründe tutulur; teslim formatına göre PDF veya istenen ortama aktarılabilir.*
+
+---------- DOSYA BITIS: teslim\RAPOR_YazLab2_Proje1.md ----------
+
+---------- DOSYA BASLANGIC: teslim\requirements-docx.txt ----------
+python-docx>=1.1.0
+
+---------- DOSYA BITIS: teslim\requirements-docx.txt ----------
+
+---------- DOSYA BASLANGIC: teslim\trafik_tablosu_ac.ps1 ----------
+# Dispatcher trafik tablosunu tarayicida acar. Once CALISTIR.ps1 ile stack ayakta olmali.
+$ErrorActionPreference = "Stop"
+$Base = if ($env:DISPATCHER_URL) { $env:DISPATCHER_URL.TrimEnd("/") } else { "http://127.0.0.1:8000" }
+
+try {
+    $ping = Invoke-WebRequest -Uri "$Base/metrics" -UseBasicParsing -TimeoutSec 5
+    if ($ping.StatusCode -ne 200) { throw "metrics yanit vermedi" }
+} catch {
+    Write-Host "Dispatcher'a ulasilamiyor: $Base" -ForegroundColor Red
+    Write-Host "Docker Desktop acik mi? Proje kokunde CALISTIR.ps1 calistirdiniz mi?"
+    exit 1
+}
+
+$body = '{"username":"admin","password":"admin123"}'
+try {
+    $r = Invoke-RestMethod -Uri "$Base/auth/login" -Method Post -ContentType "application/json; charset=utf-8" -Body $body
+} catch {
+    Write-Host "Login basarisiz: $_" -ForegroundColor Red
+    exit 1
+}
+
+if (-not $r.access_token) {
+    Write-Host "Yanitta access_token yok. Sunucu cevabi:" -ForegroundColor Red
+    $r | ConvertTo-Json
+    exit 1
+}
+
+$htmlPath = Join-Path $env:TEMP "dispatcher-traffic.html"
+$hdr = @{ Authorization = "Bearer $($r.access_token)" }
+Invoke-WebRequest -Uri "$Base/dispatcher/traffic-table?limit=50" -Headers $hdr -OutFile $htmlPath
+Write-Host "Aciliyor: $htmlPath" -ForegroundColor Green
+Start-Process $htmlPath
+
+---------- DOSYA BITIS: teslim\trafik_tablosu_ac.ps1 ----------
+
+---------- DOSYA BASLANGIC: teslim\WORD_RAPOR_OLUSTUR.ps1 ----------
+# Word raporu uretir. Python PATH'te olmali (python.org veya Microsoft Store).
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $PSScriptRoot
+Set-Location $Root
+
+$pyExe = $null
+foreach ($name in @("python", "py")) {
+    $c = Get-Command $name -ErrorAction SilentlyContinue
+    if ($c) { $pyExe = $c.Path; break }
+}
+if (-not $pyExe) {
+    Write-Host "python bulunamadi. python.org adresinden Python 3.11+ kurun." -ForegroundColor Red
+    exit 1
+}
+
+if ($pyExe -match "py\.exe$") {
+    & $pyExe -3 -m pip install -q -r teslim/requirements-docx.txt
+    & $pyExe -3 teslim/build_rapor_word.py
+} else {
+    & $pyExe -m pip install -q -r teslim/requirements-docx.txt
+    & $pyExe teslim/build_rapor_word.py
+}
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Write-Host "Dosya: teslim\RAPOR_Grup47_YazLab2_Proje1.docx" -ForegroundColor Green
+
+---------- DOSYA BITIS: teslim\WORD_RAPOR_OLUSTUR.ps1 ----------
+
